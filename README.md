@@ -1,6 +1,8 @@
 # PatchMan API
 
-Self-hosted API development & testing platform backend. Built with Go, Gin, and PostgreSQL.
+Self-hosted API development & testing platform backend. Built with Go, Gin, and PostgreSQL (or SQLite).
+
+This is the backend. For the product overview, screenshots, the MCP guide for AI agents and a quick start that runs the backend together with the web UI, see the [patchman-ui README](https://github.com/PttemDev/patchman-ui#readme).
 
 ## Features
 

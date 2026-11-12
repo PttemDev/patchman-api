@@ -1306,7 +1306,7 @@ func main() {
 
 	// Mock catch-all (no auth). The full path after `/mock/` is matched as
 	// a single capture so multi-segment user-namespaced prefixes
-	// (`kenan.kurt/test`) survive routing — the handler then walks
+	// (`jane.doe/test`) survive routing — the handler then walks
 	// segments to pick the longest registered prefix.
 	mockCatchAll := handlers.NewMockCatchAllHandler(db)
 	r.Any("/mock/*fullpath", mockCatchAll.Handle)

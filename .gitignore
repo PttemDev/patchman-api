@@ -1,6 +1,11 @@
 # Binary (root level only)
 /server
 *.exe
+bin/
+
+# Local data (SQLite databases)
+data/
+*.db
 
 # Environment
 .env

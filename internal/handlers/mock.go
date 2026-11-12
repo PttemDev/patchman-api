@@ -403,7 +403,7 @@ func (h *MockCatchAllHandler) Handle(c *gin.Context) {
 
 	// Walk path segments from longest to shortest looking for a registered
 	// prefix. Necessary because user-namespaced prefixes carry slashes
-	// (`kenan.kurt/test`) and Gin's `:prefix` only captures one segment.
+	// (`jane.doe/test`) and Gin's `:prefix` only captures one segment.
 	segments := strings.Split(full, "/")
 	var server models.MockServer
 	var path string
