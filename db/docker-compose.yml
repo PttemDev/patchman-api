@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: patchman-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-getman}
+      POSTGRES_USER: ${DB_USER:-getman}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-getman123}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - patchman_pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-getman} -d ${DB_NAME:-getman}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  patchman_pgdata:

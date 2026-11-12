@@ -1,0 +1,25 @@
+# Binary (root level only)
+/server
+*.exe
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.tenant.example
+.env.tenant
+.env.tenant.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+tmp/
+*.log

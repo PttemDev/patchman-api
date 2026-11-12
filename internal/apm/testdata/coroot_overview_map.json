@@ -1,0 +1,1053 @@
+{
+ "context": {},
+ "data": {
+  "map": [
+   {
+    "id": "i1ip3tvq:shop:Deployment:redis",
+    "cluster": "default",
+    "custom": false,
+    "category": "application",
+    "labels": {
+     "db": "redis",
+     "ns": "shop"
+    },
+    "status": "ok",
+    "icon": "redis",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:shop:Deployment:api",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "i1ip3tvq:coroot:StatefulSet:coroot-clickhouse-keeper",
+    "cluster": "default",
+    "custom": false,
+    "category": "monitoring",
+    "labels": {
+     "ns": "coroot"
+    },
+    "status": "ok",
+    "icon": "",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "warning",
+      "message": "Storage"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:coroot:DatabaseCluster:coroot-clickhouse",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "i1ip3tvq:kube-system:DaemonSet:kindnet",
+    "cluster": "default",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "ns": "kube-system"
+    },
+    "status": "ok",
+    "icon": "golang",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "i1ip3tvq:shop:Deployment:rabbitmq",
+    "cluster": "default",
+    "custom": false,
+    "category": "application",
+    "labels": {
+     "ns": "shop",
+     "queue": "rabbitmq"
+    },
+    "status": "ok",
+    "icon": "rabbitmq",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:shop:Deployment:worker",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+    "cluster": "default",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "ns": "kube-system"
+    },
+    "status": "ok",
+    "icon": "kubernetes",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "external:external:ExternalService:external:10250",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:etcd",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:coroot:Deployment:coroot-cluster-agent",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-scheduler",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:kube-system:DaemonSet:kindnet",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:local-path-storage:Deployment:local-path-provisioner",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:kube-system:DaemonSet:kube-proxy",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-controller-manager",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:kube-system:Deployment:coredns",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:coroot:Deployment:coroot-operator",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "i1ip3tvq:kube-system:StaticPods:kube-controller-manager",
+    "cluster": "default",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "ns": "kube-system"
+    },
+    "status": "ok",
+    "icon": "kubernetes",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "i1ip3tvq:local-path-storage:Deployment:local-path-provisioner",
+    "cluster": "default",
+    "custom": false,
+    "category": "application",
+    "labels": {
+     "ns": "local-path-storage"
+    },
+    "status": "ok",
+    "icon": "golang",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "i1ip3tvq:kube-system:DaemonSet:kube-proxy",
+    "cluster": "default",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "ns": "kube-system"
+    },
+    "status": "ok",
+    "icon": "golang",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "i1ip3tvq:shop:Deployment:api",
+    "cluster": "default",
+    "custom": false,
+    "category": "application",
+    "labels": {
+     "ns": "shop"
+    },
+    "status": "ok",
+    "icon": "python",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:shop:StatefulSet:postgres",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:shop:Deployment:redis",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "i1ip3tvq:shop:StatefulSet:postgres",
+    "cluster": "default",
+    "custom": false,
+    "category": "application",
+    "labels": {
+     "db": "postgres",
+     "ns": "shop"
+    },
+    "status": "ok",
+    "icon": "postgres",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "warning",
+      "message": "Storage"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:shop:Deployment:api",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "i1ip3tvq:coroot:Deployment:coroot-prometheus",
+    "cluster": "default",
+    "custom": false,
+    "category": "monitoring",
+    "labels": {
+     "db": "prometheus",
+     "ns": "coroot"
+    },
+    "status": "ok",
+    "icon": "prometheus",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "warning",
+      "message": "Storage"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:coroot:StatefulSet:coroot-coroot",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "i1ip3tvq:coroot:Deployment:coroot-operator",
+    "cluster": "default",
+    "custom": false,
+    "category": "monitoring",
+    "labels": {
+     "ns": "coroot"
+    },
+    "status": "ok",
+    "icon": "coroot",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "external:external:ExternalService:external-http",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "i1ip3tvq:kube-system:Deployment:coredns",
+    "cluster": "default",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "ns": "kube-system"
+    },
+    "status": "ok",
+    "icon": "golang",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "i1ip3tvq:_:Unknown:containerd",
+    "cluster": "default",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "instances": "1"
+    },
+    "status": "ok",
+    "icon": "golang",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "warning",
+      "message": "Storage"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "external:external:ExternalService:http.docker.internal:3128",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "external:external:ExternalService:external-http",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "external:external:ExternalService:external:4369",
+      "status": "ok",
+      "stats": [
+       "↑1/s ↓2B/s"
+      ],
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "i1ip3tvq:coroot:DatabaseCluster:coroot-clickhouse",
+    "cluster": "default",
+    "custom": false,
+    "category": "monitoring",
+    "labels": {
+     "db": "clickhouse",
+     "ns": "coroot"
+    },
+    "status": "ok",
+    "icon": "clickhouse",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "warning",
+      "message": "Storage"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:coroot:StatefulSet:coroot-clickhouse-keeper",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:coroot:StatefulSet:coroot-coroot",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "external:external:ExternalService:external:10250",
+    "cluster": "external",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "external endpoint": "172.24.0.2"
+    },
+    "status": "unknown",
+    "icon": "",
+    "indicators": null,
+    "upstreams": [],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "external:external:ExternalService:external:4369",
+    "cluster": "external",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "external endpoint": "172.22.0.3"
+    },
+    "status": "unknown",
+    "icon": "",
+    "indicators": null,
+    "upstreams": [],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:_:Unknown:containerd",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "i1ip3tvq:shop:Deployment:worker",
+    "cluster": "default",
+    "custom": false,
+    "category": "application",
+    "labels": {
+     "ns": "shop"
+    },
+    "status": "ok",
+    "icon": "python",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:shop:Deployment:rabbitmq",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "i1ip3tvq:coroot:Deployment:coroot-cluster-agent",
+    "cluster": "default",
+    "custom": false,
+    "category": "monitoring",
+    "labels": {
+     "ns": "coroot"
+    },
+    "status": "ok",
+    "icon": "coroot",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:coroot:StatefulSet:coroot-coroot",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "i1ip3tvq:kube-system:StaticPods:etcd",
+    "cluster": "default",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "ns": "kube-system"
+    },
+    "status": "ok",
+    "icon": "etcd",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "i1ip3tvq:kube-system:StaticPods:kube-scheduler",
+    "cluster": "default",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "ns": "kube-system"
+    },
+    "status": "ok",
+    "icon": "kubernetes",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "ok",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": []
+   },
+   {
+    "id": "external:external:ExternalService:http.docker.internal:3128",
+    "cluster": "external",
+    "custom": false,
+    "category": "control-plane",
+    "labels": {
+     "external endpoint": "192.168.65.1"
+    },
+    "status": "unknown",
+    "icon": "",
+    "indicators": null,
+    "upstreams": [],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:_:Unknown:containerd",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "external:external:ExternalService:external-http",
+    "cluster": "external",
+    "custom": false,
+    "category": "application",
+    "labels": {
+     "external endpoints": "140.82.121.33,..."
+    },
+    "status": "unknown",
+    "icon": "",
+    "indicators": null,
+    "upstreams": [],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:coroot:Deployment:coroot-operator",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:_:Unknown:containerd",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   },
+   {
+    "id": "i1ip3tvq:coroot:StatefulSet:coroot-coroot",
+    "cluster": "default",
+    "custom": false,
+    "category": "monitoring",
+    "labels": {
+     "ns": "coroot"
+    },
+    "status": "ok",
+    "icon": "coroot",
+    "indicators": [
+     {
+      "status": "ok",
+      "message": "Instances"
+     },
+     {
+      "status": "ok",
+      "message": "CPU"
+     },
+     {
+      "status": "ok",
+      "message": "Memory"
+     },
+     {
+      "status": "warning",
+      "message": "Storage"
+     },
+     {
+      "status": "ok",
+      "message": "Net"
+     },
+     {
+      "status": "warning",
+      "message": "Logs"
+     }
+    ],
+    "upstreams": [
+     {
+      "id": "i1ip3tvq:coroot:Deployment:coroot-prometheus",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     },
+     {
+      "id": "i1ip3tvq:coroot:DatabaseCluster:coroot-clickhouse",
+      "status": "ok",
+      "stats": null,
+      "weight": 0
+     }
+    ],
+    "downstreams": [
+     {
+      "id": "i1ip3tvq:coroot:Deployment:coroot-cluster-agent",
+      "status": "unknown",
+      "stats": null,
+      "weight": 0
+     }
+    ]
+   }
+  ]
+ }
+}

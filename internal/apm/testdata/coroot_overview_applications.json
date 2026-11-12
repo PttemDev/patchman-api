@@ -1,0 +1,227 @@
+{
+ "context": {},
+ "data": {
+  "applications": [
+   {
+    "id": "i1ip3tvq:_:Unknown:containerd",
+    "category": "control-plane",
+    "status": "warning",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:coroot:DatabaseCluster:coroot-clickhouse",
+    "category": "monitoring",
+    "status": "warning",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:coroot:StatefulSet:coroot-clickhouse-keeper",
+    "category": "monitoring",
+    "status": "warning",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:coroot:StatefulSet:coroot-coroot",
+    "category": "monitoring",
+    "status": "warning",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:coroot:Deployment:coroot-prometheus",
+    "category": "monitoring",
+    "status": "warning",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:shop:StatefulSet:postgres",
+    "category": "application",
+    "status": "warning",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:coroot:DaemonSet:coroot-node-agent",
+    "category": "monitoring",
+    "status": "info",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:shop:Deployment:redis",
+    "category": "application",
+    "status": "unknown",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:shop:Deployment:api",
+    "category": "application",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:kube-system:Deployment:coredns",
+    "category": "control-plane",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "2/2",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:coroot:Deployment:coroot-cluster-agent",
+    "category": "monitoring",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:coroot:Deployment:coroot-operator",
+    "category": "monitoring",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:kube-system:StaticPods:etcd",
+    "category": "control-plane",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:kube-system:DaemonSet:kindnet",
+    "category": "control-plane",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:kube-system:StaticPods:kube-apiserver",
+    "category": "control-plane",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:kube-system:StaticPods:kube-controller-manager",
+    "category": "control-plane",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:kube-system:DaemonSet:kube-proxy",
+    "category": "control-plane",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:kube-system:StaticPods:kube-scheduler",
+    "category": "control-plane",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:local-path-storage:Deployment:local-path-provisioner",
+    "category": "application",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:shop:Deployment:rabbitmq",
+    "category": "application",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:shop:Deployment:web",
+    "category": "application",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   },
+   {
+    "id": "i1ip3tvq:shop:Deployment:worker",
+    "category": "application",
+    "status": "ok",
+    "instances": {
+     "status": "ok",
+     "value": "1/1",
+     "chart": null
+    }
+   }
+  ]
+ }
+}
