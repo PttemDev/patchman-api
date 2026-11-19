@@ -207,6 +207,36 @@ func (h *AuthHandler) SearchUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": results})
 }
 
+// LookupUsers — GET /users/lookup?ids=a,b,c. Names for user ids, so a share
+// list kept on another backend (a desktop's local one, whose users table
+// has only its own user) can still show who a grant is for. Exposes no more
+// than /users/search does (id, name, email); at most 100 ids.
+func (h *AuthHandler) LookupUsers(c *gin.Context) {
+	var ids []string
+	for _, id := range strings.Split(c.Query("ids"), ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+		if len(ids) == 100 {
+			break
+		}
+	}
+	type userResult struct {
+		ID    string `json:"id"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	results := []userResult{}
+	if len(ids) > 0 {
+		var users []models.User
+		h.db.Where("id IN ?", ids).Find(&users)
+		for _, u := range users {
+			results = append(results, userResult{ID: u.ID, Name: u.Name, Email: u.Email})
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"data": results})
+}
+
 func (h *AuthHandler) generateToken(c *gin.Context, userID string) (string, error) {
 	return middleware.MintForRequest(c, h.jwtSecret, userID, "", h.cfg.SessionTTL)
 }

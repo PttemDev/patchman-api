@@ -116,6 +116,7 @@ docker run -p 8085:8085 \
   -e DB_USER=getman \
   -e DB_PASSWORD=getman123 \
   -e JWT_SECRET=your-secret-here \
+  -e GITLAB_TOKEN_ENC_KEY="$(openssl rand -base64 32)" \
   patchman-api
 ```
 
@@ -127,6 +128,10 @@ docker run -p 8085:8085 --env-file .env patchman-api
 
 Always set a strong, unique `JWT_SECRET` and change the default database credentials before deploying. See `.env.example` for all supported variables.
 
+Keep the same `GITLAB_TOKEN_ENC_KEY` across restarts, or saved connection secrets can't be decrypted. Without it, connection, LLM provider and Git tool routes stay off, and the log says so.
+
+To use this container from the desktop app, add it under Settings → Remote as `http://localhost:8085/api`. The URL must end in `/api`.
+
 ## Security
 
 Checks run before the initial public release (November 2026):
@@ -136,6 +141,8 @@ Checks run before the initial public release (November 2026):
 - [x] Source tree scanned for committed secrets, `.env` files and internal hostnames; none found
 
 Re-checked for 1.67.1 (November 2026): `go build ./...`, `go vet ./...` and `go test ./...` pass, and the source tree was scanned again for secrets, internal hostnames and personal names. `govulncheck` was not re-run for this version.
+
+Re-checked for 1.68.2 (November 2026): `go build ./...`, `go vet ./...` and `go test ./...` pass, and the changes since 1.67.1 were scanned for secrets, internal hostnames and personal names. `govulncheck` was not re-run for this version.
 
 Build with Go 1.26.11 or newer. Older patch releases of the standard library contain known vulnerabilities.
 

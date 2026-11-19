@@ -376,14 +376,23 @@ func (h *GitOpsHandler) Clone(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
+
+	// "Open locally" for a project this user already has on disk — a managed
+	// clone or a folder they opened and that matched this connection — opens
+	// that tree instead of cloning a fresh copy every time.
+	if existing := h.findProjectRepo(ctx, userID, connID, in.ProjectRef, in.ProjectName); existing != nil {
+		auditGit(h.db, userID, connID, "clone_reuse", true, gin.H{"repoId": existing.ID})
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{"repo": existing}})
+		return
+	}
+
 	base, err := managedGitBase()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "prepare clone dir: " + err.Error()})
 		return
 	}
 	localPath := filepath.Join(base, in.RepoID)
-
-	ctx := c.Request.Context()
 
 	// Idempotency: a healthy existing clone answers `rev-parse HEAD`. A partial
 	// dir (SIGKILL'd mid-clone still leaves a .git) does NOT, so we wipe and

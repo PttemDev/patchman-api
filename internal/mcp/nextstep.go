@@ -58,6 +58,12 @@ func withNextStep(code int, body string) string {
 	}
 	errText, _ := m["error"].(string)
 	step := nextStepFor(code, errText)
+	// On the hosted server an unknown connection id is most often one kept
+	// only in someone's desktop app (local scope) — the hosted MCP can't see
+	// it, so point at the desktop's MCP server (git already says so itself).
+	if code == http.StatusNotFound && !embedded.Load() && strings.Contains(strings.ToLower(errText), "connection not found") {
+		step += " If the connection is saved only in the PatchMan desktop app (local scope), call this tool through the desktop app's MCP server (patchman-local) instead — this hosted server cannot see it."
+	}
 	if step == "" {
 		return body
 	}

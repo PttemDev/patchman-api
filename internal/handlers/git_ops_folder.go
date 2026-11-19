@@ -8,6 +8,7 @@ package handlers
 // external repo's directory.
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"os"
@@ -85,15 +86,23 @@ func (h *GitOpsHandler) OpenFolder(c *gin.Context) {
 			p = rp
 		}
 		if p == root {
+			// Opened before without a match (no connection back then, or a
+			// different origin): try again, so adding the connection later
+			// links the folder on its next open.
+			if r.ConnectionID == "" && r.CloneKind == cloneKindExternal {
+				if connID, project := h.matchOrigin(userID, h.originOf(c, root)); connID != "" {
+					r.ConnectionID, r.ProjectRef, r.ProjectName = connID, project, project
+					h.db.Model(&models.GitRepo{}).Where("id = ?", r.ID).
+						Updates(map[string]any{"connection_id": connID, "project_ref": project, "project_name": project})
+					auditGit(h.db, userID, connID, "open_folder", true, gin.H{"repoId": r.ID, "linked": true, "relinked": true})
+				}
+			}
 			c.JSON(http.StatusOK, gin.H{"data": gin.H{"repo": r}})
 			return
 		}
 	}
 
-	origin := ""
-	if o, _, err := h.runGit(ctx, nil, "-C", root, "remote", "get-url", "origin"); err == nil {
-		origin = strings.TrimSpace(o)
-	}
+	origin := h.originOf(c, root)
 	repo := models.GitRepo{
 		ID:          in.RepoID,
 		UserID:      userID,
@@ -104,17 +113,10 @@ func (h *GitOpsHandler) OpenFolder(c *gin.Context) {
 		CloneKind:   cloneKindExternal,
 		CreatedAt:   time.Now(),
 	}
-	if origin != "" {
-		var conns []models.GitConnection
-		h.db.Where("user_id = ?", userID).Order("created_at").Find(&conns)
-		for _, cn := range conns {
-			if project := originProject(origin, connBaseURL(cn)); project != "" {
-				repo.ConnectionID = cn.ID
-				repo.ProjectRef = project
-				repo.ProjectName = project
-				break
-			}
-		}
+	if connID, project := h.matchOrigin(userID, origin); connID != "" {
+		repo.ConnectionID = connID
+		repo.ProjectRef = project
+		repo.ProjectName = project
 	}
 	if o, _, err := h.runGit(ctx, nil, "-C", root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
 		repo.DefaultBranch = strings.TrimPrefix(strings.TrimSpace(o), "origin/")
@@ -222,4 +224,116 @@ func markMissing(repos []models.GitRepo) {
 			repos[i].Missing = true
 		}
 	}
+}
+
+// originOf reads a work tree's origin URL ("" when it has none).
+func (h *GitOpsHandler) originOf(c *gin.Context, root string) string {
+	o, _, err := h.runGit(c.Request.Context(), nil, "-C", root, "remote", "get-url", "origin")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(o)
+}
+
+// matchOrigin finds the caller's git connection whose base URL serves this
+// origin, and the project path on it. "" when none does.
+func (h *GitOpsHandler) matchOrigin(userID, origin string) (string, string) {
+	if origin == "" {
+		return "", ""
+	}
+	var conns []models.GitConnection
+	h.db.Where("user_id = ?", userID).Order("created_at").Find(&conns)
+	for _, cn := range conns {
+		if project := originProject(origin, connBaseURL(cn)); project != "" {
+			return cn.ID, project
+		}
+	}
+	return "", ""
+}
+
+// findProjectRepo returns the caller's existing, healthy work tree of this
+// connection's project — matched by the project id or its path (an opened
+// folder stores the path, a managed clone the numeric id) — or nil.
+func (h *GitOpsHandler) findProjectRepo(ctx context.Context, userID, connID, projectRef, projectPath string) *models.GitRepo {
+	refs := []string{}
+	for _, r := range []string{strings.TrimSpace(projectRef), strings.TrimSpace(projectPath)} {
+		if r != "" {
+			refs = append(refs, r)
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	var rows []models.GitRepo
+	h.db.Where("user_id = ? AND connection_id = ? AND project_ref IN ?", userID, connID, refs).
+		Order("created_at").Find(&rows)
+	for i := range rows {
+		if _, err := os.Stat(rows[i].LocalPath); err != nil {
+			continue
+		}
+		if _, _, err := h.runGit(ctx, nil, "-C", rows[i].LocalPath, "rev-parse", "HEAD"); err == nil {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+type gitLinkInput struct {
+	ConnectionID string `json:"connectionId"`
+	ProjectRef   string `json:"projectRef"`
+	ProjectName  string `json:"projectName"`
+}
+
+// Link — POST /git/repos/:repoId/link {connectionId, projectRef, projectName}.
+// Ties a folder opened from disk to a git connection's project by hand (when
+// its origin didn't match automatically), so MRs / CI work on it. The
+// folder's origin must point at the connection's host: a PatchMan-held token
+// is offered for a linked repo's remote, and it must never reach another host.
+func (h *GitOpsHandler) Link(c *gin.Context) {
+	if !h.gitGate(c) {
+		return
+	}
+	userID := c.GetString("userID")
+	var repo models.GitRepo
+	if err := h.db.Where("id = ? AND user_id = ?", c.Param("repoId"), userID).First(&repo).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Repository not found"})
+		return
+	}
+	var in gitLinkInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	in.ProjectRef = strings.TrimSpace(in.ProjectRef)
+	in.ProjectName = strings.TrimSpace(in.ProjectName)
+	if in.ProjectRef == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "projectRef is required"})
+		return
+	}
+	var conn models.GitConnection
+	if err := h.db.Where("id = ? AND user_id = ?", in.ConnectionID, userID).First(&conn).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Connection not found"})
+		return
+	}
+	origin := h.originOf(c, repo.LocalPath)
+	if origin == "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "This folder has no origin remote to link"})
+		return
+	}
+	if originProject(origin, connBaseURL(conn)) == "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "This folder's origin is not on the connection's host"})
+		return
+	}
+	name := in.ProjectName
+	if name == "" {
+		name = in.ProjectRef
+	}
+	if err := h.db.Model(&models.GitRepo{}).Where("id = ?", repo.ID).
+		Updates(map[string]any{"connection_id": conn.ID, "project_ref": in.ProjectRef, "project_name": name}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "save link"})
+		return
+	}
+	repo.ConnectionID, repo.ProjectRef, repo.ProjectName = conn.ID, in.ProjectRef, name
+	auditGit(h.db, userID, conn.ID, "link_folder", true, gin.H{"repoId": repo.ID, "projectRef": in.ProjectRef})
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"repo": repo}})
 }

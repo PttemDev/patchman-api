@@ -363,6 +363,7 @@ func main() {
 
 	// User search
 	api.GET("/users/search", authHandler.SearchUsers)
+	api.GET("/users/lookup", authHandler.LookupUsers)
 
 	// Excalidraw whiteboards — per-user scene CRUD (no secrets, no cipher).
 	wbH := handlers.NewWhiteboardHandler(db)
@@ -735,6 +736,13 @@ func main() {
 		} else {
 			log.Printf("embedded: %v", err)
 		}
+	}
+	if tokenKey == "" {
+		// Every connection tool (DB, ES, Redis, Kafka, S3, K8s, Git, LLM…)
+		// is registered only with a cipher. Without one their routes 404 and
+		// the desktop's dual-write leaves connections on the local side only
+		// — say so loudly instead of failing quietly per request.
+		log.Printf("WARNING: GITLAB_TOKEN_ENC_KEY is not set — connection, LLM provider and Git tool routes are DISABLED on this server (set a base64 32-byte key, e.g. `openssl rand -base64 32`)")
 	}
 
 	// GitLab integration handler — constructed once and shared by BOTH the
@@ -1244,6 +1252,7 @@ func main() {
 			gitGroup.POST("/connections/:id/clone", gitOps.Clone)
 			gitGroup.GET("/repos", gitOps.ListRepos)
 			gitGroup.POST("/repos/open", gitOps.OpenFolder)
+			gitGroup.POST("/repos/:repoId/link", gitOps.Link)
 			gitGroup.GET("/repos/:repoId/status", gitOps.Status)
 			gitGroup.GET("/repos/:repoId/log", gitOps.Log)
 			gitGroup.GET("/repos/:repoId/branches", gitOps.Branches)
@@ -1501,6 +1510,10 @@ func main() {
 			"version":                buildVersion,
 			"gitlabHostname":         gitlabHost,
 			"emailDomainPlaceholder": emailDomain,
+			// false = no GITLAB_TOKEN_ENC_KEY: this server stores no
+			// connections (DB / ES / Git / LLM…); clients warn instead of
+			// letting writes 404.
+			"connectionsEnabled": tokenKey != "",
 		})
 	})
 
