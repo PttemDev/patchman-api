@@ -2,8 +2,11 @@ package k8sclient
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +15,7 @@ import (
 	"patchman-be/internal/models"
 	"patchman-be/internal/services"
 
+	"golang.org/x/oauth2"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/discovery"
 	memory "k8s.io/client-go/discovery/cached/memory"
@@ -60,6 +64,11 @@ type pooled struct {
 	clientset *kubernetes.Clientset
 	rest      *rest.Config
 	lastUsed  time.Time
+	// fingerprint is the configFingerprint of the connection row the entry was
+	// built from. A lookup with a different fingerprint rebuilds, so a request
+	// that loaded the row just before an edit (and lands after Close) can never
+	// pin stale credentials in the pool.
+	fingerprint string
 
 	// v2 write surface: a dynamic client + a GVK→GVR REST mapper, built lazily
 	// on first apply/action and reused for the pooled clientset's lifetime. The
@@ -132,7 +141,15 @@ type options struct {
 	// ReadSecretHosts lets the service map read the Secrets a workload
 	// references, to extract host:port only (values never leave the BE).
 	ReadSecretHosts bool `json:"readSecretHosts"`
+	// GCPCredentialID: a GKE cluster added from Google Cloud — every request
+	// carries a token from that (owner's) credential, refreshed as it expires.
+	GCPCredentialID string `json:"gcpCredentialId"`
 }
+
+// GCPTokenSource resolves a Google Cloud credential to a token source; set at
+// startup (handlers.GCPHandler.TokenSourceFor). nil = GKE connections can't
+// authenticate.
+var GCPTokenSource func(ownerID, credID string) (oauth2.TokenSource, error)
 
 func parseOptions(raw string) options {
 	var o options
@@ -208,6 +225,13 @@ func kubeconfigUsesExecAuth(cfg *clientcmdapi.Config) bool {
 	return false
 }
 
+// configFingerprint identifies the credential-bearing parts of a connection
+// row: a new kubeconfig or options change yields a new fingerprint.
+func configFingerprint(conn models.K8sConnection) string {
+	h := sha256.Sum256([]byte(conn.KubeconfigEnc + "\x00" + conn.OptionsJSON))
+	return hex.EncodeToString(h[:8])
+}
+
 // pooledKey builds the pool key for a connection/context pair.
 func pooledKey(connID, contextName string) string {
 	return connID + "|" + contextName
@@ -225,7 +249,7 @@ func (r *Registry) resolve(conn models.K8sConnection, contextName string) (*pool
 	if conn.ID != "" {
 		key := pooledKey(conn.ID, ctxName)
 		r.mu.Lock()
-		if p, ok := r.pooled[key]; ok {
+		if p, ok := r.pooled[key]; ok && p.fingerprint == configFingerprint(conn) {
 			p.lastUsed = time.Now()
 			r.mu.Unlock()
 			return p, nil
@@ -237,21 +261,43 @@ func (r *Registry) resolve(conn models.K8sConnection, contextName string) (*pool
 	if err != nil {
 		return nil, err
 	}
-	restCfg, err := buildRESTConfig(cfg, ctxName, parseOptions(conn.OptionsJSON), r.allowExec(conn))
+	opt := parseOptions(conn.OptionsJSON)
+	restCfg, err := buildRESTConfig(cfg, ctxName, opt, r.allowExec(conn))
 	if err != nil {
+		return nil, err
+	}
+	if err := applyGCPAuth(restCfg, conn.UserID, opt.GCPCredentialID); err != nil {
 		return nil, err
 	}
 	clientset, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return nil, fmt.Errorf("build clientset: %w", err)
 	}
-	p := &pooled{clientset: clientset, rest: restCfg, lastUsed: time.Now()}
+	p := &pooled{clientset: clientset, rest: restCfg, lastUsed: time.Now(), fingerprint: configFingerprint(conn)}
 	if conn.ID != "" {
 		r.mu.Lock()
 		r.pooled[pooledKey(conn.ID, ctxName)] = p
 		r.mu.Unlock()
 	}
 	return p, nil
+}
+
+// applyGCPAuth wires a GKE connection's Google token into the transport.
+func applyGCPAuth(restCfg *rest.Config, ownerID, credID string) error {
+	if credID == "" {
+		return nil
+	}
+	if GCPTokenSource == nil {
+		return fmt.Errorf("Google Cloud isn't available on this server")
+	}
+	ts, err := GCPTokenSource(ownerID, credID)
+	if err != nil {
+		return err
+	}
+	ts = oauth2.ReuseTokenSource(nil, ts)
+	restCfg.BearerToken, restCfg.BearerTokenFile = "", ""
+	restCfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper { return &oauth2.Transport{Source: ts, Base: rt} }
+	return nil
 }
 
 // buildRESTConfig turns a parsed kubeconfig + context name into a *rest.Config

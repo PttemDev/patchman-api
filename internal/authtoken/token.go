@@ -20,3 +20,16 @@ func Mint(secret, userID string, ttl time.Duration) (string, error) {
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
 }
+
+// MintSession is Mint plus the `sid` claim naming the UserSession row, so the
+// device can be listed and revoked (DESKTOP_SECURITY_RFC L8).
+func MintSession(secret, userID, sid string, ttl time.Duration) (string, error) {
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"user_id": userID,
+		"sid":     sid,
+		"iat":     now.Unix(),
+		"exp":     now.Add(ttl).Unix(),
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
+}

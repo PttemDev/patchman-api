@@ -19,6 +19,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"patchman-be/internal/middleware"
 	"time"
 
 	"patchman-be/internal/cloudsession"
@@ -78,7 +79,7 @@ func (c *caller) callCtx(ctx context.Context, method, path string, body any) (in
 		b, _ := json.Marshal(body)
 		rdr = bytes.NewReader(b)
 	}
-	req := httptest.NewRequest(method, path, rdr).WithContext(ctx)
+	req := httptest.NewRequest(method, path, rdr).WithContext(middleware.WithInProcess(ctx))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.mintJWT())
 	req.Header.Set(clientHeader, clientHeaderMCP)
@@ -172,6 +173,11 @@ func callCloud(ctx context.Context, sess cloudsession.Session, method, path stri
 // becomes an MCP tool error (IsError) carrying the backend's JSON body so
 // the model sees the real validation/permission message.
 func result(code int, body string) (*mcpsdk.CallToolResult, any, error) {
+	if code >= 400 {
+		body = withNextStep(code, body)
+	} else {
+		body = compactReply(body)
+	}
 	return &mcpsdk.CallToolResult{
 		Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: body}},
 		IsError: code >= 400,
@@ -180,8 +186,11 @@ func result(code int, body string) (*mcpsdk.CallToolResult, any, error) {
 
 // reg is a tiny helper to register a typed tool.
 func reg[In any](s *mcpsdk.Server, name, desc string, h func(In) (int, string)) {
-	mcpsdk.AddTool(s, &mcpsdk.Tool{Name: name, Description: desc},
-		func(_ context.Context, _ *mcpsdk.CallToolRequest, in In) (*mcpsdk.CallToolResult, any, error) {
+	mcpsdk.AddTool(s, &mcpsdk.Tool{Name: name, Description: desc, Annotations: annotationsFor(name)},
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, in In) (*mcpsdk.CallToolResult, any, error) {
+			if ok, why := confirmCall(ctx, req, name); !ok {
+				return declined(why)
+			}
 			code, body := h(in)
 			return result(code, body)
 		})
@@ -190,11 +199,22 @@ func reg[In any](s *mcpsdk.Server, name, desc string, h func(In) (int, string)) 
 // regCtx is reg for tools that must honor client cancellation: its handler
 // receives the request's context.Context to thread into callCtx.
 func regCtx[In any](s *mcpsdk.Server, name, desc string, h func(context.Context, In) (int, string)) {
-	mcpsdk.AddTool(s, &mcpsdk.Tool{Name: name, Description: desc},
-		func(ctx context.Context, _ *mcpsdk.CallToolRequest, in In) (*mcpsdk.CallToolResult, any, error) {
+	mcpsdk.AddTool(s, &mcpsdk.Tool{Name: name, Description: desc, Annotations: annotationsFor(name)},
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, in In) (*mcpsdk.CallToolResult, any, error) {
+			if ok, why := confirmCall(ctx, req, name); !ok {
+				return declined(why)
+			}
+			stop := withProgress(ctx, req, name)
+			defer stop()
 			code, body := h(ctx, in)
 			return result(code, body)
 		})
+}
+
+// declined is the result of a call the user refused when asked.
+func declined(why string) (*mcpsdk.CallToolResult, any, error) {
+	b, _ := json.Marshal(map[string]string{"error": why, "nextStep": "Don't retry; ask the user what they want instead."})
+	return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: string(b)}}, IsError: true}, nil, nil
 }
 
 // BuildServer constructs an MCP server whose tools act as userID by
@@ -215,9 +235,25 @@ func BuildServer(engine *gin.Engine, jwtSecret, userID string, scopes mcpscope.T
 // project the agent works in, when its bridge said ("" otherwise): agent
 // memory groups and ranks cards by it.
 func BuildServerAs(engine *gin.Engine, jwtSecret, userID string, scopes mcpscope.ToolScopes, agent, project string) *mcpsdk.Server {
+	return BuildServerFor(engine, jwtSecret, userID, scopes, agent, project, false)
+}
+
+// BuildServerFor is BuildServerAs; initialize marks the request that opens a
+// session — only then are the instructions sent, so only then is the list of
+// memories the user can read looked up for them.
+func BuildServerFor(engine *gin.Engine, jwtSecret, userID string, scopes mcpscope.ToolScopes, agent, project string, initialize bool) *mcpsdk.Server {
 	var opts *mcpsdk.ServerOptions
-	if scopes.Allows(mcpscope.GroupNotes) {
-		opts = &mcpsdk.ServerOptions{Instructions: memoryInstructions}
+	instr := serverInstructions(scopes)
+	if initialize && scopes.Allows(mcpscope.GroupNotes) {
+		dc := &caller{engine: engine, jwtSecret: jwtSecret, userID: userID, agent: agent, project: project}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if d := memoryInstructionsDigest(dc.memoryFolders(ctx)); d != "" {
+			instr += "\n\n" + d
+		}
+		cancel()
+	}
+	if instr != "" {
+		opts = &mcpsdk.ServerOptions{Instructions: instr}
 	}
 	s := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "patchman",
@@ -291,6 +327,27 @@ func BuildServerAs(engine *gin.Engine, jwtSecret, userID string, scopes mcpscope
 	if scopes.Allows(mcpscope.GroupGraylog) {
 		registerGraylogTools(s, c)
 	}
+	if scopes.Allows(mcpscope.GroupGCP) {
+		registerGCPTools(s, c)
+	}
+	if PluginTools != nil {
+		PluginTools(s, c.callCtx, scopes.Allows)
+	}
+	registerResources(s, c, scopes)
+	registerPrompts(s, c, scopes)
 
 	return s
+}
+
+// PluginTools registers installed plugins' tools (PLUGIN_MARKETPLACE_RFC
+// §6.2). Set once at startup by the plugin subsystem. call runs a request
+// through the in-process engine as this server's user; allows is the
+// token's scope check (plugin groups are "plugin:<id>").
+var PluginTools func(s *mcpsdk.Server, call func(ctx context.Context, method, path string, body any) (int, string), allows func(group string) bool)
+
+// ToolResult is the MCP result for a status + body pair; exported for
+// tools registered outside this package.
+func ToolResult(code int, body string) *mcpsdk.CallToolResult {
+	r, _, _ := result(code, body)
+	return r
 }

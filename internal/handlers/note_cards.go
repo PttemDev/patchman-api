@@ -359,7 +359,7 @@ func (h *NoteHandler) Recall(c *gin.Context) {
 	}
 	project := notecards.ProjectKey(firstNonEmpty(c.Query("project"), noteProject(c)))
 	// from: answer only from one person's notes (what they shared with the
-	// caller — or the caller's own), "ask Ekrem's memory".
+	// caller — or the caller's own), "ask Alex's memory".
 	var owners []string
 	if from := strings.TrimSpace(c.Query("from")); from != "" {
 		people := h.peopleNamed(from)
@@ -526,7 +526,16 @@ func (h *NoteHandler) recall(userID, q string, budget int, scopeFilter, project 
 	for _, hit := range hits {
 		ids = append(ids, hit.ID)
 	}
+	if sentenceLike(q) {
+		hints = append(hints, "q reads like a sentence; recall matches words — for better hits send keywords in the memories' language (names, identifiers, versions) plus synonyms.")
+	}
 	return notecards.RenderFor(hits, budget, dedupe(hints), terms), ids
+}
+
+// sentenceLike: a question written as prose (8+ words or a question mark).
+// The language is not judged: team memories are often Turkish.
+func sentenceLike(q string) bool {
+	return strings.Contains(q, "?") || len(strings.Fields(q)) >= 8
 }
 
 // ── remember ─────────────────────────────────────────────────────────────
@@ -537,6 +546,13 @@ type rememberInput struct {
 	Scope   string `json:"scope"`   // personal (default) | team
 	Folder  string `json:"folderId"`
 	Project string `json:"project"` // project name; MCP calls default to the agent's working directory
+	// Key is a stable id of the memory's source (a memory file's path):
+	// remembering the same key again replaces that card in place.
+	Key string `json:"key"`
+	// Adopt names an existing agent card (id or #short) that takes the key
+	// when no card has it yet — for memories filed before keys existed
+	// under a different title.
+	Adopt string `json:"adopt"`
 }
 
 // rememberMaxRunes caps one memory (characters, not bytes: Turkish text
@@ -574,6 +590,11 @@ func (h *NoteHandler) Remember(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "This looks like it contains a secret (" + kind + "). Memories are shared and kept — leave the secret out and remember the rest."})
 		return
 	}
+	in.Key = strings.TrimSpace(in.Key)
+	if len(in.Key) > 255 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "key is too long (255 characters max)"})
+		return
+	}
 	folder, status, msg := h.memoryFolder(userID, in.Scope, in.Folder)
 	if msg != "" {
 		c.JSON(status, gin.H{"error": msg})
@@ -589,7 +610,7 @@ func (h *NoteHandler) Remember(c *gin.Context) {
 		}
 		folder = pf
 	}
-	item := models.NoteInbox{ID: uuid.New().String(), UserID: userID, FolderID: folder.ID, Text: in.Text, Context: in.Context, Agent: noteAgent(c), Status: "pending"}
+	item := models.NoteInbox{ID: uuid.New().String(), UserID: userID, FolderID: folder.ID, Text: in.Text, Context: in.Context, Agent: noteAgent(c), SourceKey: in.Key, Adopt: strings.TrimPrefix(strings.TrimSpace(in.Adopt), "#"), Status: "pending"}
 	done := make(chan struct{})
 	h.waiters.Store(item.ID, done)
 	defer h.waiters.Delete(item.ID)
@@ -613,6 +634,21 @@ func (h *NoteHandler) Remember(c *gin.Context) {
 	if n := utf8.RuneCountInString(in.Text); n > rememberGoodRunes {
 		out["hint"] = fmt.Sprintf("Saved, but at %d characters it is long for one card (%d reads best): next time split it into one fact, decision or root cause per remember, or put the details in a page (create_note) and link it with [[Page title]].", n, rememberGoodRunes)
 	}
+	// A sync tool (keyed) mirrors files: no anchor to ask it for.
+	hints := notecards.Lint(in.Text, strings.TrimSpace(in.Context) != "" || in.Key != "")
+	if n := utf8.RuneCountInString(in.Text); n > rememberGoodRunes && len(hints) > 0 {
+		// The length hint above already says it.
+		filtered := hints[:0]
+		for _, h := range hints {
+			if !strings.HasPrefix(h, "Long for one card") {
+				filtered = append(filtered, h)
+			}
+		}
+		hints = filtered
+	}
+	if len(hints) > 0 {
+		out["hints"] = hints
+	}
 	if folder.Project != "" {
 		out["project"] = folder.Title
 	}
@@ -626,6 +662,43 @@ func (h *NoteHandler) Remember(c *gin.Context) {
 	}
 	out["queued"] = true
 	c.JSON(http.StatusAccepted, gin.H{"data": out})
+}
+
+// Forget soft-deletes the caller's cards with a source key (POST
+// /notes/forget {key}; a split memory's parts with key#n too, when
+// parts=true) — what a sync tool calls for a memory file it no longer has.
+// Recoverable by the owner like any deleted note.
+func (h *NoteHandler) Forget(c *gin.Context) {
+	userID := c.GetString("userID")
+	var in struct {
+		Key   string `json:"key"`
+		Parts bool   `json:"parts"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil || strings.TrimSpace(in.Key) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "key is required"})
+		return
+	}
+	var q *gorm.DB
+	if in.Parts {
+		q = h.db.Where("type = ? AND (source_key = ? OR source_key LIKE ?)", "card", in.Key, in.Key+"#%")
+	} else {
+		q = h.db.Where("type = ? AND source_key = ?", "card", in.Key)
+	}
+	var cards []models.Note
+	q.Find(&cards)
+	forgotten := []string{}
+	for _, n := range cards {
+		if !canEditNote(h.db, userID, n.ID) {
+			continue
+		}
+		if err := h.db.Delete(&models.Note{}, "id = ?", n.ID).Error; err != nil {
+			continue
+		}
+		notesearch.Remove(h.db, []string{n.ID})
+		notifyNote(h.db, c, n.ID, realtime.EventNoteDeleted)
+		forgotten = append(forgotten, "#"+notecards.ShortID(n.ID))
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"forgotten": forgotten}})
 }
 
 // memoryFolder finds (or, for personal memory, creates) the folder a
@@ -867,6 +940,9 @@ func (h *NoteHandler) rememberOne(item models.NoteInbox) (string, string, error)
 	if !canEditNote(h.db, item.UserID, folder.ID) {
 		return "", "", errString("no longer allowed to write to the memory folder")
 	}
+	if item.SourceKey != "" {
+		return h.upsertKeyed(item, folder)
+	}
 	if cards, known, err := h.atomize(item, folder); err == nil {
 		id, err := h.fileCards(item, folder, cards, known)
 		return id, "split", err
@@ -880,6 +956,85 @@ func (h *NoteHandler) rememberOne(item models.NoteInbox) (string, string, error)
 		return "", "", err
 	}
 	return n.ID, "created", nil
+}
+
+// upsertKeyed files a keyed memory: the card with this key in the same
+// memory (any of its project folders) is replaced in place — id, links and
+// history kept, title / summary / body from the new text; an unkeyed card
+// with the same title in the target folder adopts the key (memories written
+// before keys existed); otherwise a new card is created with the key.
+func (h *NoteHandler) upsertKeyed(item models.NoteInbox, folder models.Note) (string, string, error) {
+	title, summary, body := notecards.DeriveCard(item.Text)
+	body = h.resolveWikiLinks(item.UserID, folder.ID, body)
+	root := h.memoryRoot(&folder.ID)
+	var cands []models.Note
+	h.db.Where("source_key = ? AND type = ? AND user_id = ?", item.SourceKey, "card", folder.UserID).Find(&cands)
+	var target *models.Note
+	for i := range cands {
+		if h.memoryRoot(cands[i].ParentID) == root {
+			target = &cands[i]
+			break
+		}
+	}
+	outcome := "updated"
+	if target == nil && item.Adopt != "" {
+		// An explicit card to adopt: an unkeyed agent card in the same memory.
+		var n models.Note
+		q := h.db.Where("type = ? AND source = ? AND user_id = ? AND (source_key = '' OR source_key IS NULL)", "card", "agent", folder.UserID)
+		if len(item.Adopt) == 8 {
+			q = q.Where("id LIKE ?", "%"+item.Adopt)
+		} else {
+			q = q.Where("id = ?", item.Adopt)
+		}
+		if q.First(&n).Error == nil && h.memoryRoot(n.ParentID) == root {
+			target = &n
+			outcome = "adopted"
+		}
+	}
+	if target == nil {
+		norm := func(s string) string { return strings.ToLower(strings.Join(strings.Fields(notesearch.Fold(s)), " ")) }
+		var siblings []models.Note
+		// Only an agent's card is adopted by title: a person's card with the
+		// same title is never overwritten (it gets a new keyed card beside it).
+		h.db.Where("parent_id = ? AND type = ? AND source = ? AND (source_key = '' OR source_key IS NULL)", folder.ID, "card", "agent").Find(&siblings)
+		for i := range siblings {
+			if norm(siblings[i].Title) == norm(title) {
+				target = &siblings[i]
+				outcome = "adopted"
+				break
+			}
+		}
+	}
+	if target == nil {
+		n, err := h.createCard(item, folder, title, summary, body)
+		if err != nil {
+			return "", "", err
+		}
+		h.db.Model(&models.Note{}).Where("id = ?", n.ID).Update("source_key", item.SourceKey)
+		return n.ID, "created", nil
+	}
+	if target.Title == title && target.Summary == summary && target.Body == body {
+		if target.SourceKey != item.SourceKey {
+			h.db.Model(&models.Note{}).Where("id = ?", target.ID).Update("source_key", item.SourceKey)
+		}
+		return target.ID, "unchanged", nil
+	}
+	if !canEditNote(h.db, item.UserID, target.ID) {
+		return "", "", errString("not allowed to update the card with this key")
+	}
+	res := h.db.Model(&models.Note{}).Where("id = ?", target.ID).Updates(map[string]any{
+		"title": title, "summary": summary, "body": body, "source_key": item.SourceKey, "agent": item.Agent,
+		"stale": false, "version": gorm.Expr("version + 1"), "updated_by": item.UserID, "updated_at": time.Now(),
+	})
+	if res.Error != nil {
+		return "", "", res.Error
+	}
+	var n models.Note
+	if err := h.db.Where("id = ?", target.ID).First(&n).Error; err != nil {
+		return "", "", err
+	}
+	afterNoteContentChange(h.db, nil, &n, item.UserID, noteSourceMCP)
+	return n.ID, outcome, nil
 }
 
 // duplicateCard reports whether the folder already has this card: the same
@@ -958,6 +1113,9 @@ func (h *NoteHandler) resolveWikiLinks(userID, folderID, body string) string {
 			}
 		}
 		if dst == "" {
+			dst = h.cardBySourceStem(userID, target)
+		}
+		if dst == "" {
 			return ""
 		}
 		return "[" + strings.ReplaceAll(label, "]", "") + "](note:" + dst + ")"
@@ -965,6 +1123,25 @@ func (h *NoteHandler) resolveWikiLinks(userID, folderID, body string) string {
 }
 
 func ptrIs(p *string, v string) bool { return p != nil && *p == v }
+
+// cardBySourceStem resolves [[project-x]] to the card synced from the memory
+// file project_x.md (its source key ends in that file name; a split file's
+// first part counts). Dashes and underscores are the same.
+func (h *NoteHandler) cardBySourceStem(userID, target string) string {
+	stem := strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(strings.TrimSpace(target), ".md"), "-", "_"))
+	if stem == "" || strings.ContainsAny(stem, "%/\\ ") {
+		return ""
+	}
+	var cands []models.Note
+	h.db.Select("id", "source_key").Where("deleted_at IS NULL AND type = ? AND (LOWER(REPLACE(source_key, '-', '_')) LIKE ? OR LOWER(REPLACE(source_key, '-', '_')) LIKE ?)",
+		"card", "%/"+stem+".md", "%/"+stem+".md#1").Limit(10).Find(&cands)
+	for _, c := range cands {
+		if canReadNote(h.db, userID, c.ID) {
+			return c.ID
+		}
+	}
+	return ""
+}
 
 // InboxStatus reports what became of a remember() call (GET /notes/inbox/:id).
 func (h *NoteHandler) InboxStatus(c *gin.Context) {

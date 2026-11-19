@@ -3,6 +3,8 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -116,6 +118,10 @@ type gitPushInput struct {
 
 type gitPullInput struct {
 	AccessToken string `json:"accessToken"`
+	Strategy    string `json:"strategy"` // ff (default) | merge | rebase
+	Autostash   bool   `json:"autostash"`
+	Remote      string `json:"remote"` // optional; both or neither
+	Branch      string `json:"branch"`
 }
 
 // repoIDPattern guards filesystem paths derived from the FE-minted repo id
@@ -184,9 +190,10 @@ func (h *GitOpsHandler) opsToken(userID, connID, supplied string) string {
 // environment (callers build it from os.Environ()).
 func (h *GitOpsHandler) runGit(ctx context.Context, env []string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, h.gitBin, args...)
-	if env != nil {
-		cmd.Env = env
+	if env == nil {
+		env = os.Environ()
 	}
+	cmd.Env = append(env[:len(env):len(env)], headlessEnv...)
 	var out, errb bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -207,6 +214,23 @@ func gitErrMsg(stderr string, err error) string {
 	return "git command failed"
 }
 
+// askpassScript answers git's credential prompts ("Username for
+// 'https://host': ", "Password for 'https://oauth2@host': ") ONLY for the
+// host in $PATCHMAN_GIT_HOST — the connection's own host. Any other host (a
+// remote the user added, a redirect, a submodule) gets an empty answer, so the
+// token never leaves for a server it was not issued for. Empty host = refuse.
+const askpassScript = `#!/bin/sh
+[ -n "$PATCHMAN_GIT_HOST" ] || exit 0
+case "$1" in
+  *"://$PATCHMAN_GIT_HOST'"*|*"@$PATCHMAN_GIT_HOST'"*) ;;
+  *) exit 0 ;;
+esac
+case "$1" in
+  Username*) echo "${PATCHMAN_GIT_USER:-oauth2}" ;;
+  *) echo "$PATCHMAN_GIT_TOKEN" ;;
+esac
+`
+
 // writeGitAskpass writes the STATIC askpass helper — the token is NEVER written
 // into the script; it is read from $PATCHMAN_GIT_TOKEN at call time. The file is
 // 0700 because git execs it (a non-executable helper fails with EACCES); 0700
@@ -216,8 +240,7 @@ func writeGitAskpass() (string, func(), error) {
 	if err != nil {
 		return "", func() {}, err
 	}
-	const script = "#!/bin/sh\ncase \"$1\" in\nUsername*) echo oauth2 ;;\n*) echo \"$PATCHMAN_GIT_TOKEN\" ;;\nesac\n"
-	if _, err := f.WriteString(script); err != nil {
+	if _, err := f.WriteString(askpassScript); err != nil {
 		_ = f.Close()
 		_ = os.Remove(f.Name())
 		return "", func() {}, err
@@ -234,7 +257,13 @@ func writeGitAskpass() (string, func(), error) {
 // authEnv builds the child environment for token-authenticated git (clone /
 // push): the static askpass script + the token via env only + terminal prompt
 // disabled. The caller must invoke cleanup to remove the script.
-func authEnv(token string) (env []string, cleanup func(), err error) {
+func authEnv(token, remoteURL string) (env []string, cleanup func(), err error) {
+	return authEnvAs("oauth2", token, remoteURL)
+}
+
+// authEnvAs is authEnv with the username git sends with the token: GitLab
+// takes "oauth2", GitHub "x-access-token" (it works for every GitHub token type).
+func authEnvAs(user, token, remoteURL string) (env []string, cleanup func(), err error) {
 	script, cleanup, err := writeGitAskpass()
 	if err != nil {
 		return nil, func() {}, err
@@ -242,9 +271,47 @@ func authEnv(token string) (env []string, cleanup func(), err error) {
 	env = append(os.Environ(),
 		"GIT_ASKPASS="+script,
 		"PATCHMAN_GIT_TOKEN="+token,
-		"GIT_TERMINAL_PROMPT=0",
+		"PATCHMAN_GIT_HOST="+tokenHost(remoteURL),
+		"PATCHMAN_GIT_USER="+user,
 	)
 	return env, cleanup, nil
+}
+
+// gitUser is the token username for a repo's connection (see authEnvAs).
+func (h *GitOpsHandler) gitUser(connID string) string {
+	if connID != "" && h.db != nil {
+		var conn models.GitConnection
+		if h.db.Select("provider").Where("id = ?", connID).Limit(1).Find(&conn).Error == nil && strings.EqualFold(conn.Provider, "github") {
+			return "x-access-token"
+		}
+	}
+	return "oauth2"
+}
+
+// tokenHost is the host[:port] a token may be answered for: the https origin
+// the clone was made from (stored on the repo, not read back from
+// .git/config, so editing a remote's URL cannot redirect the token). scp-style
+// SSH or anything unparsable yields "" (= never answer).
+func tokenHost(remoteURL string) string {
+	u, err := url.Parse(strings.TrimSpace(remoteURL))
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+		return ""
+	}
+	return u.Host
+}
+
+// headlessEnv keeps git from ever waiting on a human: no terminal prompt, no
+// editor for merge / rebase --continue / commit messages.
+var headlessEnv = []string{
+	"GIT_TERMINAL_PROMPT=0",
+	"GIT_EDITOR=true",
+	"GIT_SEQUENCE_EDITOR=true",
+	"GIT_MERGE_AUTOEDIT=no",
+	// Conflict markers carry the common ancestor (||||||| base), which the
+	// 3-pane resolver shows in the Result column (GIT_IDE_PLAN §C).
+	"GIT_CONFIG_COUNT=1",
+	"GIT_CONFIG_KEY_0=merge.conflictStyle",
+	"GIT_CONFIG_VALUE_0=diff3",
 }
 
 // managedGitBase derives a stable app-data base for managed clones. The frozen
@@ -329,7 +396,7 @@ func (h *GitOpsHandler) Clone(c *gin.Context) {
 	}
 	if !healthy {
 		_ = os.RemoveAll(localPath)
-		env, cleanup, aerr := authEnv(h.opsToken(userID, conn.ID, in.AccessToken))
+		env, cleanup, aerr := authEnvAs(h.gitUser(conn.ID), h.opsToken(userID, conn.ID, in.AccessToken), in.RemoteURL)
 		if aerr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "prepare auth: " + aerr.Error()})
 			return
@@ -397,6 +464,7 @@ func (h *GitOpsHandler) ListRepos(c *gin.Context) {
 	if repos == nil {
 		repos = []models.GitRepo{}
 	}
+	markMissing(repos)
 	auditGit(h.db, userID, "", "repos_local", true, gin.H{"count": len(repos)})
 	c.JSON(http.StatusOK, gin.H{"data": repos})
 }
@@ -839,6 +907,12 @@ func (h *GitOpsHandler) Push(c *gin.Context) {
 		return
 	}
 	in.AccessToken = h.opsToken(userID, repo.ConnectionID, in.AccessToken)
+	if !tokenAllowed(repo) {
+		// Stand-alone folder: push with the machine's own git credentials
+		// (send it through PushTo, which needs no token).
+		c.JSON(http.StatusBadRequest, gin.H{"error": "this folder has no git connection; push it with the Push dialog"})
+		return
+	}
 	if in.AccessToken == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "accessToken is required to push"})
 		return
@@ -849,7 +923,7 @@ func (h *GitOpsHandler) Push(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 
-	env, cleanup, aerr := authEnv(in.AccessToken)
+	env, cleanup, aerr := authEnvAs(h.gitUser(repo.ConnectionID), in.AccessToken, repo.RemoteURL)
 	if aerr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "prepare auth: " + aerr.Error()})
 		return
@@ -934,16 +1008,12 @@ func (h *GitOpsHandler) Pull(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	in.AccessToken = h.opsToken(userID, repo.ConnectionID, in.AccessToken)
-	if in.AccessToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "accessToken is required to pull"})
-		return
-	}
 	ctx := c.Request.Context()
 
-	env, cleanup, aerr := authEnv(in.AccessToken)
-	if aerr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "prepare auth: " + aerr.Error()})
+	// The token is optional: a public origin (or one on disk) pulls without
+	// it; a private one fails with git's own auth error.
+	env, cleanup, ok := h.withAuth(c, repo, in.AccessToken)
+	if !ok {
 		return
 	}
 	defer cleanup()
@@ -953,12 +1023,44 @@ func (h *GitOpsHandler) Pull(c *gin.Context) {
 		branch = strings.TrimSpace(out)
 	}
 
-	if _, stderr, err := h.runGit(ctx, env, "-C", repo.LocalPath, "pull", "--ff-only"); err != nil {
-		auditGit(h.db, userID, repo.ConnectionID, "pull", false, gin.H{"repoId": repo.ID, "branch": branch})
-		c.JSON(http.StatusBadGateway, gin.H{"error": "git pull (fast-forward only): " + gitErrMsg(stderr, err)})
+	strategy := strings.TrimSpace(in.Strategy)
+	args := []string{"-C", repo.LocalPath, "pull"}
+	switch strategy {
+	case "", "ff":
+		strategy = "ff"
+		args = append(args, "--ff-only")
+	case "merge":
+		args = append(args, "--no-rebase", "--no-edit")
+	case "rebase":
+		args = append(args, "--rebase")
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "strategy must be ff, merge or rebase"})
 		return
 	}
-	auditGit(h.db, userID, repo.ConnectionID, "pull", true, gin.H{"repoId": repo.ID, "branch": branch})
+	if in.Autostash && strategy != "ff" {
+		args = append(args, "--autostash")
+	}
+	if in.Remote != "" || in.Branch != "" {
+		if !validRemoteName(in.Remote) || !safeArg(in.Branch) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid remote or branch"})
+			return
+		}
+		args = append(args, in.Remote, in.Branch)
+	}
+	detail := gin.H{"repoId": repo.ID, "branch": branch, "strategy": strategy}
+	if _, stderr, err := h.runGit(ctx, env, args...); err != nil {
+		// A merge/rebase that stopped on conflicts is a result, not a failure:
+		// the FE opens the resolver and offers continue / abort.
+		if st := h.opState(ctx, repo.LocalPath); st.Operation != "" {
+			auditGit(h.db, userID, repo.ConnectionID, "pull", true, gin.H{"repoId": repo.ID, "branch": branch, "strategy": strategy, "conflicts": true})
+			c.JSON(http.StatusOK, gin.H{"data": gin.H{"branch": branch, "pulled": false, "conflicts": true, "state": st}})
+			return
+		}
+		auditGit(h.db, userID, repo.ConnectionID, "pull", false, detail)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "git pull: " + gitErrMsg(stderr, err)})
+		return
+	}
+	auditGit(h.db, userID, repo.ConnectionID, "pull", true, detail)
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"branch": branch, "pulled": true}})
 }
 
@@ -967,6 +1069,12 @@ func (h *GitOpsHandler) Pull(c *gin.Context) {
 // API base is the connection BaseURL, falling back to the clone URL's origin
 // when the connection carries none (e.g. oauth connections).
 func (h *GitOpsHandler) openMergeRequest(ctx context.Context, repo *models.GitRepo, token, source, target, title, desc string) (string, error) {
+	if repo.ConnectionID != "" {
+		var conn models.GitConnection
+		if err := h.db.First(&conn, "id = ?", repo.ConnectionID).Error; err == nil && isGitHub(&conn) {
+			return openGitHubPull(ctx, &conn, repo.ProjectRef, token, source, target, title, desc)
+		}
+	}
 	base := h.gitAPIBase(repo)
 	if base == "" {
 		return "", fmt.Errorf("no GitLab base URL available for this connection")
@@ -1007,6 +1115,64 @@ func (h *GitOpsHandler) openMergeRequest(ctx context.Context, repo *models.GitRe
 		return "", fmt.Errorf("decode merge request response: %w", err)
 	}
 	return mr.WebURL, nil
+}
+
+// openGitHubPull opens a pull request on GitHub for a pushed branch. The
+// project ref is the repo id the FE cloned from (or owner/name).
+func openGitHubPull(ctx context.Context, conn *models.GitConnection, projectRef, token, source, target, title, desc string) (string, error) {
+	base := gitHubAPIBaseOverride
+	if base == "" {
+		base = gitHubAPIBase(conn.BaseURL)
+	}
+	ref := strings.TrimSpace(projectRef)
+	if strings.HasPrefix(ref, "local:") || ref == "" {
+		return "", fmt.Errorf("this folder isn't linked to a GitHub repository")
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	do := func(method, path string, body any, out any) error {
+		var rd io.Reader
+		if body != nil {
+			b, _ := json.Marshal(body)
+			rd = bytes.NewReader(b)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, base+path, rd)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		if resp.StatusCode/100 != 2 {
+			return fmt.Errorf("github %d: %s", resp.StatusCode, ghMessage(raw))
+		}
+		return json.Unmarshal(raw, out)
+	}
+	full := ref
+	if _, err := strconv.ParseInt(ref, 10, 64); err == nil {
+		var r struct {
+			FullName string `json:"full_name"`
+		}
+		if err := do(http.MethodGet, "/repositories/"+ref, nil, &r); err != nil {
+			return "", err
+		}
+		full = r.FullName
+	}
+	var pr struct {
+		HTMLURL string `json:"html_url"`
+	}
+	if err := do(http.MethodPost, "/repos/"+full+"/pulls", map[string]any{"head": source, "base": target, "title": title, "body": desc}, &pr); err != nil {
+		return "", err
+	}
+	return pr.HTMLURL, nil
 }
 
 // gitAPIBase resolves the "<scheme>://<host>/api/v4" prefix for the repo's
@@ -1050,7 +1216,7 @@ func (h *GitOpsHandler) LocalFile(c *gin.Context) {
 	}
 	ref := strings.TrimSpace(c.Query("ref"))
 
-	var content string
+	var content, diskSHA string
 	if ref != "" {
 		if !safeArg(ref) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid ref"})
@@ -1077,9 +1243,17 @@ func (h *GitOpsHandler) LocalFile(c *gin.Context) {
 			return
 		}
 		content = string(b)
+		sum := sha256.Sum256(b)
+		diskSHA = hex.EncodeToString(sum[:])
 	}
 	auditGit(h.db, userID, repo.ConnectionID, "file", true, gin.H{"repoId": repo.ID, "path": path, "ref": ref})
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"path": path, "content": content}})
+	data := gin.H{"path": path, "content": content}
+	if diskSHA != "" {
+		// Hash of the bytes on disk — the editor echoes it back as
+		// expectedSha256 so a save can tell the file changed underneath it.
+		data["sha256"] = diskSHA
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
 }
 
 // WriteFile — POST /git/repos/:repoId/file  { path, content }. Writes content
@@ -1097,6 +1271,11 @@ func (h *GitOpsHandler) WriteFile(c *gin.Context) {
 	var in struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
+		// ExpectedSHA256 (optional): hex SHA-256 of the content the editor
+		// loaded. When the file on disk no longer matches it (changed by
+		// another editor, a checkout, …) the write is refused with 409 so an
+		// (auto) save never silently overwrites it. Empty = write as before.
+		ExpectedSHA256 string `json:"expectedSha256"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1118,6 +1297,18 @@ func (h *GitOpsHandler) WriteFile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot write inside .git"})
 		return
 	}
+	if want := strings.ToLower(strings.TrimSpace(in.ExpectedSHA256)); want != "" {
+		cur, rerr := os.ReadFile(full)
+		if rerr != nil && !os.IsNotExist(rerr) {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "read file: " + rerr.Error()})
+			return
+		}
+		sum := sha256.Sum256(cur) // a missing file reads as empty
+		if hex.EncodeToString(sum[:]) != want {
+			c.JSON(http.StatusConflict, gin.H{"error": "The file changed on disk since it was opened", "code": "changed_on_disk"})
+			return
+		}
+	}
 	// Preserve the existing file mode; default to 0644 for a new file.
 	mode := os.FileMode(0o644)
 	if fi, statErr := os.Stat(full); statErr == nil {
@@ -1133,7 +1324,8 @@ func (h *GitOpsHandler) WriteFile(c *gin.Context) {
 		return
 	}
 	auditGit(h.db, userID, repo.ConnectionID, "write_file", true, gin.H{"repoId": repo.ID, "path": path})
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"ok": true, "path": path}})
+	written := sha256.Sum256([]byte(in.Content))
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"ok": true, "path": path, "sha256": hex.EncodeToString(written[:])}})
 }
 
 // RevealPath — GET /git/repos/:repoId/local-path. Returns the clone's absolute

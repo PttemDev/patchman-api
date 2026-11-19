@@ -58,6 +58,8 @@ type GitRepo struct {
 	CloneKind     string     `gorm:"type:varchar(16);default:blobless" json:"cloneKind"`
 	LastFetchedAt *time.Time `json:"lastFetchedAt"`
 	CreatedAt     time.Time  `json:"createdAt"`
+	// Missing is computed on list: the folder no longer exists on disk.
+	Missing bool `gorm:"-" json:"missing,omitempty"`
 }
 
 func (GitRepo) TableName() string { return "git_repos" }

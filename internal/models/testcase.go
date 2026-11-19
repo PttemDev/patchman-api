@@ -12,11 +12,11 @@ type TestCase struct {
 	FolderID    *string   `gorm:"type:varchar(36);index" json:"folderId"`
 	Title       string    `gorm:"type:varchar(500);not null" json:"title"`
 	Description string    `gorm:"type:text" json:"description"`
-	Priority    string    `gorm:"type:varchar(5);default:'P2'" json:"priority"`   // P0-P4
-	Type        string    `gorm:"type:varchar(20);default:'manual'" json:"type"`  // manual/automated
-	Tags        string    `gorm:"type:text" json:"tags"`                          // JSON array
-	Steps       string    `gorm:"type:text" json:"steps"`                         // JSON [{stepNo, action, expected}]
-	Status      string    `gorm:"type:varchar(20);default:'draft'" json:"status"` // draft/active/deprecated
+	Priority    string    `gorm:"type:varchar(5);default:'P2'" json:"priority"`      // P0-P4
+	Type        string    `gorm:"type:varchar(20);default:'functional'" json:"type"` // functional/integration/performance/security
+	Tags        string    `gorm:"type:text" json:"tags"`                             // comma-separated
+	Steps       string    `gorm:"type:text" json:"steps"`                            // JSON [{stepNo, type, …}]; untyped = manual step
+	Status      string    `gorm:"type:varchar(20);default:'draft'" json:"status"`    // draft/active/deprecated
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }

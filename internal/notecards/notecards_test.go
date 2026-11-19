@@ -65,6 +65,9 @@ func TestSecretKindWiderShapesAndPlaceholders(t *testing.T) {
 		"postgres://user:Xq7fakeValue9@10.0.0.1:5432/db",
 		"token: Xq7fakeValue9abc",
 		"docker run -e GITLAB_TOKEN_ENC_KEY=c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0MTIzNDU2Nzg= img",
+		// a dotted value that isn't an identifier stays a secret
+		"token=Ab9.x7Kq-2",
+		"password: hunter2.Zz9!",
 	} {
 		if SecretKind(s) == "" {
 			t.Errorf("missed secret in %q", s)
@@ -81,6 +84,10 @@ func TestSecretKindWiderShapesAndPlaceholders(t *testing.T) {
 		"`fe/src-tauri/.keys/patchman.key` holds the updater key; password is an empty string.",
 		"API_KEY_HEADER=X-Api-Key",
 		"refresh header token: X-Refreshed-Token",
+		// Go assignments of qualified identifiers in code notes (1.67 memory sync).
+		"via `dbquery.GCPTokenSource = gcpH.BigQueryTokenSource` (main.go)",
+		"k8sclient.GCPTokenSource = gcpH.TokenSourceFor",
+		"cfg.Secret = os.Getenv()",
 	} {
 		if k := SecretKind(s); k != "" {
 			t.Errorf("false positive %q in %q", k, s)
@@ -140,5 +147,25 @@ func TestProjectKeyAndWikiLinks(t *testing.T) {
 	got := WikiLinks("See [[Tauri signing]], [[#abcd1234]] and [[tauri signing|again]]; not [[]].")
 	if !reflect.DeepEqual(got, []string{"Tauri signing", "#abcd1234"}) {
 		t.Errorf("wiki links = %v", got)
+	}
+}
+
+// The second hit's matching paragraph is shown under its line, so a right
+// card ranked second still carries the answer.
+func TestRenderExcerptsNextHits(t *testing.T) {
+	long := strings.Repeat("filler words about other things. ", 60)
+	hits := []Hit{
+		{ID: "11111111-0000-0000-0000-000000000000", Title: "Release 1.66", Line: "Many features.", Body: long + "\n\nsign-in mentioned once."},
+		{ID: "22222222-0000-0000-0000-000000000000", Title: "Auth connectors", Line: "GitHub + Google sign-in.", Body: "Intro.\n\nGET /auth/methods lists the enabled sign-in methods; the login page reads it."},
+	}
+	out := RenderFor(hits, 800, nil, []string{"auth", "methods", "endpoint"})
+	if !strings.Contains(out, "  > ") || !strings.Contains(out, "/auth/methods") {
+		t.Errorf("second hit excerpt missing:\n%s", out)
+	}
+	if len(out) > 800*4 {
+		t.Errorf("over budget: %d", len(out))
+	}
+	if c := Coverage("GitHub + Google sign-in AUTH", []string{"auth", "github", "x"}); c < 0.66 || c > 0.67 {
+		t.Errorf("coverage = %v", c)
 	}
 }

@@ -135,9 +135,9 @@ type createTestCaseIn struct {
 	Title       string `json:"title" jsonschema:"test case title"`
 	Description string `json:"description,omitempty"`
 	Priority    string `json:"priority,omitempty" jsonschema:"P0..P4 (default P2)"`
-	Type        string `json:"type,omitempty" jsonschema:"manual or automated"`
-	Tags        string `json:"tags,omitempty" jsonschema:"tags as a JSON array string"`
-	Steps       string `json:"steps,omitempty" jsonschema:"steps as a JSON array string [{stepNo,action,expected}]"`
+	Type        string `json:"type,omitempty" jsonschema:"functional (default), integration, performance or security"`
+	Tags        string `json:"tags,omitempty" jsonschema:"comma-separated tags, e.g. web,checkout"`
+	Steps       string `json:"steps,omitempty" jsonschema:"steps as a JSON array string; see the tool description for the step shape"`
 	Status      string `json:"status,omitempty" jsonschema:"draft/active/deprecated"`
 	FolderID    string `json:"folderId,omitempty" jsonschema:"test folder id to file the case in (see list_test_folders); omit for the root"`
 }
@@ -146,11 +146,19 @@ type updateTestCaseIn struct {
 	Title       string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
 	Priority    string `json:"priority,omitempty"`
-	Type        string `json:"type,omitempty"`
-	Tags        string `json:"tags,omitempty"`
-	Steps       string `json:"steps,omitempty"`
+	Type        string `json:"type,omitempty" jsonschema:"functional, integration, performance or security"`
+	Tags        string `json:"tags,omitempty" jsonschema:"comma-separated tags (replaces the list)"`
+	Steps       string `json:"steps,omitempty" jsonschema:"steps as a JSON array string (replaces all steps); see the tool description for the step shape"`
 	Status      string `json:"status,omitempty"`
 }
+
+// testStepShape documents the step objects the QA runner and editor read.
+const testStepShape = " Steps run in order against a shared variable scope; each is an object with stepNo and type:" +
+	` {"type":"request","request":{"method":"GET","url":"{{baseUrl}}/users","headers":{"Accept":"application/json"},"body":""}}` +
+	` · {"type":"assertion","assertions":[{"type":"status|body_contains|json_path|response_time|header","operator":"equals|not_equals|contains|not_contains|exists|not_empty|greater_than|less_than|matches","value":"200","path":"$.id (json_path)","key":"(header name)"}]} checks the last response` +
+	` · {"type":"extract","extractions":[{"variable":"token","source":"json_path|header|body|status","path":"$.token"}]} saves {{token}} for later steps` +
+	` · {"type":"wait","waitMs":1000}.` +
+	" A step with only action/expected (no type) is a manual step: shown in the editor, skipped by run_test_folder. A missing type is inferred from request/assertions/extractions/waitMs."
 
 // Test-case folders. A folder nests under parentId (null = top level); a case
 // sits in folderId (null = root). Folders are owner-only, like test cases.
@@ -181,9 +189,9 @@ func registerTestCaseTools(s *mcpsdk.Server, c *caller) {
 		func(_ struct{}) (int, string) { return c.call("GET", "/api/test-cases", nil) })
 	reg(s, "get_test_case", "Get a single test case by id.",
 		func(in idIn) (int, string) { return c.call("GET", "/api/test-cases/"+url.PathEscape(in.ID), nil) })
-	reg(s, "create_test_case", "Create a new test case.",
+	reg(s, "create_test_case", "Create a new test case."+testStepShape,
 		func(in createTestCaseIn) (int, string) { return c.call("POST", "/api/test-cases", in) })
-	reg(s, "update_test_case", "Update an existing test case.",
+	reg(s, "update_test_case", "Update an existing test case. Fields you omit stay as they are."+testStepShape,
 		func(in updateTestCaseIn) (int, string) {
 			return c.call("PUT", "/api/test-cases/"+url.PathEscape(in.ID), in)
 		})

@@ -250,10 +250,16 @@ func (r *Registry) Close(connectionID string) {
 	r.mu.Lock()
 	pc, ok := r.clients[connectionID]
 	delete(r.clients, connectionID)
+	kpc, kok := r.clients[connectionID+"#kibana"]
+	delete(r.clients, connectionID+"#kibana")
 	r.mu.Unlock()
 	if ok {
 		pc.client.CloseIdleConnections()
 	}
+	if kok {
+		kpc.client.CloseIdleConnections()
+	}
+	dropKibanaCache(connectionID)
 }
 
 func (r *Registry) reapLoop() {

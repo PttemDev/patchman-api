@@ -168,8 +168,8 @@ func TestListTools(t *testing.T) {
 	for _, tl := range res.Tools {
 		got[tl.Name] = true
 	}
-	if len(got) != 119 {
-		t.Errorf("tool count = %d, want 119", len(got))
+	if len(got) != 133 {
+		t.Errorf("tool count = %d, want 133", len(got))
 	}
 	for _, want := range []string{
 		"list_collections", "create_collection", "update_collection", "delete_collection",
@@ -185,7 +185,7 @@ func TestListTools(t *testing.T) {
 		"list_kafka_connections", "list_s3_connections", "list_k8s_connections", "list_grafana_connections",
 		"list_rabbitmq_connections",
 		"send_http_request", "run_db_query",
-		"es_cluster", "es_indices", "es_mapping", "es_request",
+		"es_cluster", "es_indices", "es_mapping", "es_request", "es_data_views", "es_data_view_search",
 		"redis_scan_keys", "redis_get", "redis_key_meta", "redis_command",
 		"kafka_topics", "kafka_brokers", "kafka_groups", "kafka_lag", "kafka_consume",
 		"s3_list_buckets", "s3_list_objects", "s3_get_object",

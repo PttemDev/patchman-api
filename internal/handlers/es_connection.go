@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -141,6 +142,74 @@ func kibanaURLFromOptions(opts map[string]any) string {
 	return strings.TrimSpace(s)
 }
 
+// validKibanaURL accepts empty, a bare host[:port], or an http(s) URL.
+func validKibanaURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return true
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Scheme == "http" || u.Scheme == "https"
+}
+
+// kibanaHostOf returns the lower-cased host[:port] of a kibanaUrl ("" = none).
+func kibanaHostOf(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Host)
+}
+
+func kibanaURLFromJSON(optionsJSON string) string {
+	var m map[string]any
+	if json.Unmarshal([]byte(optionsJSON), &m) != nil {
+		return ""
+	}
+	return kibanaURLFromOptions(m)
+}
+
+// kibanaSecretGuard: for direct (non-proxy) connections the stored ES secret
+// is also sent to options.kibanaUrl. When that Kibana host is set or changed,
+// the matching secret must be re-entered in the same update, so a stored
+// credential is never silently redirected to a new host.
+func kibanaSecretGuard(conn models.ESConnection, input updateESInput) bool {
+	if input.Options == nil {
+		return true
+	}
+	kind := conn.AuthKind
+	if input.AuthKind != nil {
+		kind = normalizeESAuthKind(*input.AuthKind)
+	}
+	newHost := kibanaHostOf(kibanaURLFromOptions(input.Options))
+	if kind == "kibanaProxy" || newHost == "" || newHost == kibanaHostOf(kibanaURLFromJSON(conn.OptionsJSON)) {
+		return true
+	}
+	given := func(p *string) bool { return p != nil && *p != "" }
+	switch kind {
+	case "basic":
+		return conn.PasswordEnc == "" || given(input.Password)
+	case "apiKey":
+		return conn.ApiKeyEnc == "" || given(input.ApiKey)
+	case "bearer":
+		return conn.BearerEnc == "" || given(input.Bearer)
+	}
+	return true
+}
+
 func (h *ESConnectionHandler) Create(c *gin.Context) {
 	userID := c.GetString("userID")
 	var input createESInput
@@ -154,6 +223,10 @@ func (h *ESConnectionHandler) Create(c *gin.Context) {
 	}
 	if !validESAuthKind(input.AuthKind) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "authKind must be none, basic, apiKey, bearer, or kibanaProxy"})
+		return
+	}
+	if !validKibanaURL(kibanaURLFromOptions(input.Options)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kibanaUrl must be an http(s) URL"})
 		return
 	}
 	if normalizeESAuthKind(input.AuthKind) == "kibanaProxy" {
@@ -284,6 +357,17 @@ func (h *ESConnectionHandler) Update(c *gin.Context) {
 	var input updateESInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if input.Options != nil && !validKibanaURL(kibanaURLFromOptions(input.Options)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kibanaUrl must be an http(s) URL"})
+		return
+	}
+	if !kibanaSecretGuard(conn, input) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "The Kibana address changed: re-enter the connection's secret so it can be sent to the new Kibana host.",
+			"code":  "kibana_secret_required",
+		})
 		return
 	}
 	updates := map[string]any{}
@@ -488,6 +572,17 @@ func (h *ESConnectionHandler) Test(c *gin.Context) {
 	}
 	if !ok {
 		out["error"] = string(res.Body)
+	}
+	// Direct connections with an optional Kibana URL: probe Kibana too. A
+	// failure is a warning only — the ES side still works.
+	if ok && conn.AuthKind != "kibanaProxy" && esquery.HasKibana(*conn) {
+		kctx, kcancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+		defer kcancel()
+		if kerr := h.registry.PingKibana(kctx, *conn); kerr != nil {
+			out["kibana"] = gin.H{"ok": false, "error": kerr.Error()}
+		} else {
+			out["kibana"] = gin.H{"ok": true}
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": out})
 }

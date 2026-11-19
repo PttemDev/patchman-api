@@ -1,0 +1,663 @@
+[
+ {
+  "id": "mem-01",
+  "prompt": "What did we decide about the session TTL? Answer from memory.",
+  "groups": [
+   "notes"
+  ],
+  "ideal": [
+   {
+    "tool": "recall",
+    "args": {
+     "q": "session TTL sliding refresh decision"
+    }
+   }
+  ],
+  "mustNotCall": [
+   "create_note",
+   "delete_note"
+  ]
+ },
+ {
+  "id": "mem-02",
+  "prompt": "Remember: the payments service retries a charge at most twice.",
+  "groups": [
+   "notes"
+  ],
+  "ideal": [
+   {
+    "tool": "remember",
+    "args": {
+     "text": "payments service retries a charge at most twice"
+    }
+   }
+  ]
+ },
+ {
+  "id": "mem-03",
+  "prompt": "What does Alex know about Kafka lag alerts?",
+  "groups": [
+   "notes"
+  ],
+  "ideal": [
+   {
+    "tool": "recall",
+    "args": {
+     "q": "kafka lag alert",
+     "from": "Alex"
+    }
+   }
+  ]
+ },
+ {
+  "id": "mem-04",
+  "prompt": "Which memories can you read?",
+  "groups": [
+   "notes"
+  ],
+  "ideal": [
+   {
+    "tool": "memory_folders",
+    "args": {}
+   }
+  ]
+ },
+ {
+  "id": "mem-05",
+  "prompt": "Link the 'Checkout timeout' card to 'Payment provider SLA' as depends_on.",
+  "groups": [
+   "notes"
+  ],
+  "ideal": [
+   {
+    "tool": "search_notes",
+    "args": {
+     "query": "Checkout timeout"
+    }
+   },
+   {
+    "tool": "search_notes",
+    "args": {
+     "query": "Payment provider SLA"
+    }
+   },
+   {
+    "tool": "link_notes",
+    "args": {
+     "src": "n1",
+     "dst": "n2",
+     "type": "depends_on"
+    }
+   }
+  ]
+ },
+ {
+  "id": "db-01",
+  "prompt": "How many orders were created today in the shop database?",
+  "groups": [
+   "db"
+  ],
+  "ideal": [
+   {
+    "tool": "list_db_connections",
+    "args": {}
+   },
+   {
+    "tool": "run_db_query",
+    "args": {
+     "connectionId": "d1",
+     "query": "select count(*) from orders where created_at >= current_date"
+    }
+   }
+  ],
+  "mustNotCall": [
+   "delete_request"
+  ]
+ },
+ {
+  "id": "db-02",
+  "prompt": "Show the 5 slowest queries' tables in the shop DB schema.",
+  "groups": [
+   "db"
+  ],
+  "ideal": [
+   {
+    "tool": "list_db_connections",
+    "args": {}
+   },
+   {
+    "tool": "run_db_query",
+    "args": {
+     "connectionId": "d1",
+     "query": "select table_name from information_schema.tables limit 50"
+    }
+   }
+  ]
+ },
+ {
+  "id": "db-03",
+  "prompt": "Estimate how much BigQuery would scan for SELECT * FROM events.",
+  "groups": [
+   "db"
+  ],
+  "ideal": [
+   {
+    "tool": "list_db_connections",
+    "args": {}
+   },
+   {
+    "tool": "run_db_query",
+    "args": {
+     "connectionId": "bq1",
+     "query": "SELECT * FROM events"
+    }
+   }
+  ]
+ },
+ {
+  "id": "k8s-01",
+  "prompt": "Which pods in namespace shop are crash-looping?",
+  "groups": [
+   "k8s"
+  ],
+  "ideal": [
+   {
+    "tool": "list_k8s_connections",
+    "args": {}
+   },
+   {
+    "tool": "k8s_list_resources",
+    "args": {
+     "id": "k1",
+     "kind": "Pod",
+     "namespace": "shop"
+    }
+   }
+  ]
+ },
+ {
+  "id": "k8s-02",
+  "prompt": "Show me the checkout deployment's spec.",
+  "groups": [
+   "k8s"
+  ],
+  "ideal": [
+   {
+    "tool": "list_k8s_connections",
+    "args": {}
+   },
+   {
+    "tool": "k8s_get_resource",
+    "args": {
+     "id": "k1",
+     "kind": "Deployment",
+     "name": "checkout",
+     "namespace": "shop"
+    }
+   }
+  ]
+ },
+ {
+  "id": "k8s-03",
+  "prompt": "Give me an overview of the prod cluster.",
+  "groups": [
+   "k8s"
+  ],
+  "ideal": [
+   {
+    "tool": "list_k8s_connections",
+    "args": {}
+   },
+   {
+    "tool": "k8s_overview",
+    "args": {
+     "id": "k1"
+    }
+   }
+  ]
+ },
+ {
+  "id": "git-01",
+  "prompt": "List open merge requests in group/shop.",
+  "groups": [
+   "git"
+  ],
+  "ideal": [
+   {
+    "tool": "list_git_connections",
+    "args": {}
+   },
+   {
+    "tool": "git_merge_requests",
+    "args": {
+     "connectionId": "g1",
+     "project": "group/shop",
+     "state": "opened"
+    }
+   }
+  ]
+ },
+ {
+  "id": "git-02",
+  "prompt": "Review MR !42 in group/shop and summarize the risks; don't post anything.",
+  "groups": [
+   "git"
+  ],
+  "ideal": [
+   {
+    "tool": "git_merge_request",
+    "args": {
+     "connectionId": "g1",
+     "project": "group/shop",
+     "iid": 42
+    }
+   },
+   {
+    "tool": "git_merge_request_changes",
+    "args": {
+     "connectionId": "g1",
+     "project": "group/shop",
+     "iid": 42
+    }
+   }
+  ],
+  "mustNotCall": [
+   "git_create_merge_request_note",
+   "git_approve_merge_request"
+  ]
+ },
+ {
+  "id": "git-03",
+  "prompt": "Why did the latest pipeline on main fail in group/shop?",
+  "groups": [
+   "git"
+  ],
+  "ideal": [
+   {
+    "tool": "git_pipelines",
+    "args": {
+     "connectionId": "g1",
+     "project": "group/shop",
+     "ref": "main"
+    }
+   },
+   {
+    "tool": "git_pipeline",
+    "args": {
+     "connectionId": "g1",
+     "project": "group/shop",
+     "pipeline": 900
+    }
+   },
+   {
+    "tool": "git_job_log",
+    "args": {
+     "connectionId": "g1",
+     "project": "group/shop",
+     "job": 77
+    }
+   }
+  ]
+ },
+ {
+  "id": "git-04",
+  "prompt": "Run the nightly workflow on GitHub repo acme/api now.",
+  "groups": [
+   "git"
+  ],
+  "ideal": [
+   {
+    "tool": "git_workflows",
+    "args": {
+     "connectionId": "gh1",
+     "project": "acme/api"
+    }
+   },
+   {
+    "tool": "git_run_pipeline",
+    "args": {
+     "connectionId": "gh1",
+     "project": "acme/api",
+     "ref": "main",
+     "workflow": "5"
+    }
+   }
+  ]
+ },
+ {
+  "id": "git-05",
+  "prompt": "Read the README of acme/api on GitHub.",
+  "groups": [
+   "git"
+  ],
+  "ideal": [
+   {
+    "tool": "git_file",
+    "args": {
+     "connectionId": "gh1",
+     "project": "acme/api",
+     "path": "README.md"
+    }
+   }
+  ]
+ },
+ {
+  "id": "es-01",
+  "prompt": "How many error logs did checkout write in the last hour (Elasticsearch)?",
+  "groups": [
+   "es"
+  ],
+  "ideal": [
+   {
+    "tool": "list_es_connections",
+    "args": {}
+   },
+   {
+    "tool": "es_request",
+    "args": {
+     "method": "POST",
+     "path": "/logs-*/_count",
+     "body": {
+      "query": {
+       "term": {
+        "level": "error"
+       }
+      }
+     },
+     "id": "e1"
+    }
+   }
+  ]
+ },
+ {
+  "id": "es-02",
+  "prompt": "List the Elasticsearch indices and their sizes.",
+  "groups": [
+   "es"
+  ],
+  "ideal": [
+   {
+    "tool": "list_es_connections",
+    "args": {}
+   },
+   {
+    "tool": "es_indices",
+    "args": {
+     "id": "e1"
+    }
+   }
+  ]
+ },
+ {
+  "id": "kafka-01",
+  "prompt": "Which Kafka consumer group is lagging the most?",
+  "groups": [
+   "kafka"
+  ],
+  "ideal": [
+   {
+    "tool": "list_kafka_connections",
+    "args": {}
+   },
+   {
+    "tool": "kafka_lag",
+    "args": {
+     "id": "ka1"
+    }
+   }
+  ]
+ },
+ {
+  "id": "kafka-02",
+  "prompt": "Show the last 5 messages on topic orders.",
+  "groups": [
+   "kafka"
+  ],
+  "ideal": [
+   {
+    "tool": "list_kafka_connections",
+    "args": {}
+   },
+   {
+    "tool": "kafka_consume",
+    "args": {
+     "topic": "orders",
+     "id": "ka1",
+     "n": 5
+    }
+   }
+  ]
+ },
+ {
+  "id": "redis-01",
+  "prompt": "Find session keys in Redis and show one.",
+  "groups": [
+   "redis"
+  ],
+  "ideal": [
+   {
+    "tool": "list_redis_connections",
+    "args": {}
+   },
+   {
+    "tool": "redis_scan_keys",
+    "args": {
+     "pattern": "session:*",
+     "id": "r1"
+    }
+   },
+   {
+    "tool": "redis_get",
+    "args": {
+     "key": "session:1",
+     "id": "r1"
+    }
+   }
+  ]
+ },
+ {
+  "id": "rabbit-01",
+  "prompt": "Which RabbitMQ queues have messages waiting?",
+  "groups": [
+   "rabbitmq"
+  ],
+  "ideal": [
+   {
+    "tool": "list_rabbitmq_connections",
+    "args": {}
+   },
+   {
+    "tool": "rabbitmq_queues",
+    "args": {
+     "id": "rb1"
+    }
+   }
+  ]
+ },
+ {
+  "id": "graf-01",
+  "prompt": "What's the p95 latency of checkout on the Grafana dashboard?",
+  "groups": [
+   "grafana"
+  ],
+  "ideal": [
+   {
+    "tool": "list_grafana_connections",
+    "args": {}
+   },
+   {
+    "tool": "grafana_dashboards",
+    "args": {
+     "query": "checkout",
+     "id": "gf1"
+    }
+   },
+   {
+    "tool": "grafana_panel_data",
+    "args": {
+     "uid": "abc",
+     "panelId": 2,
+     "id": "gf1"
+    }
+   }
+  ]
+ },
+ {
+  "id": "gl-01",
+  "prompt": "Search Graylog for 'payment timeout' in the last 15 minutes.",
+  "groups": [
+   "graylog"
+  ],
+  "ideal": [
+   {
+    "tool": "list_graylog_connections",
+    "args": {}
+   },
+   {
+    "tool": "graylog_search",
+    "args": {
+     "query": "payment timeout",
+     "id": "gl1",
+     "range": 900
+    }
+   }
+  ]
+ },
+ {
+  "id": "gcp-01",
+  "prompt": "List the files under 2026/ in the shop-invoices bucket.",
+  "groups": [
+   "gcp"
+  ],
+  "ideal": [
+   {
+    "tool": "list_gcp_credentials",
+    "args": {}
+   },
+   {
+    "tool": "gcs_list_objects",
+    "args": {
+     "credentialId": "c1",
+     "bucket": "shop-invoices",
+     "prefix": "2026/"
+    }
+   }
+  ]
+ },
+ {
+  "id": "gcp-02",
+  "prompt": "Peek at messages waiting on Pub/Sub subscription orders-worker.",
+  "groups": [
+   "gcp"
+  ],
+  "ideal": [
+   {
+    "tool": "list_gcp_credentials",
+    "args": {}
+   },
+   {
+    "tool": "pubsub_peek",
+    "args": {
+     "credentialId": "c1",
+     "subscription": "orders-worker",
+     "max": 5
+    }
+   }
+  ]
+ },
+ {
+  "id": "gcp-03",
+  "prompt": "Any ERROR logs from checkout pods in Cloud Logging in the last hour?",
+  "groups": [
+   "gcp"
+  ],
+  "ideal": [
+   {
+    "tool": "list_gcp_credentials",
+    "args": {}
+   },
+   {
+    "tool": "gcp_logs_search",
+    "args": {
+     "credentialId": "c1",
+     "filter": "severity>=ERROR AND resource.labels.container_name=\"checkout\""
+    }
+   }
+  ]
+ },
+ {
+  "id": "http-01",
+  "prompt": "Send the saved 'Get order' request and tell me the status.",
+  "groups": [
+   "collections",
+   "requests",
+   "http"
+  ],
+  "ideal": [
+   {
+    "tool": "list_collections",
+    "args": {}
+   },
+   {
+    "tool": "list_collection_requests",
+    "args": {
+     "id": "col1"
+    }
+   },
+   {
+    "tool": "get_request",
+    "args": {
+     "id": "req1"
+    }
+   },
+   {
+    "tool": "send_http_request",
+    "args": {
+     "method": "GET",
+     "url": "https://shop.example/api/orders/7"
+    }
+   }
+  ]
+ },
+ {
+  "id": "svc-01",
+  "prompt": "Which services call payments and what's their error rate?",
+  "groups": [
+   "observability"
+  ],
+  "ideal": [
+   {
+    "tool": "list_observability_connections",
+    "args": {}
+   },
+   {
+    "tool": "service_map",
+    "args": {
+     "observability": [
+      "o1"
+     ],
+     "range": "1h"
+    }
+   }
+  ]
+ },
+ {
+  "id": "qa-01",
+  "prompt": "Run the 'Smoke' test folder and report failures.",
+  "groups": [
+   "testcases"
+  ],
+  "ideal": [
+   {
+    "tool": "list_test_folders",
+    "args": {}
+   },
+   {
+    "tool": "run_test_folder",
+    "args": {
+     "id": "f1"
+    }
+   }
+  ]
+ }
+]

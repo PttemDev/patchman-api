@@ -123,6 +123,10 @@ type gitMergeRequest struct {
 	Author       string `json:"author"`
 	WebURL       string `json:"webUrl"`
 	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt,omitempty"`
+	Draft        bool   `json:"draft,omitempty"`
+	HasConflicts bool   `json:"hasConflicts,omitempty"`
+	Notes        int    `json:"notes,omitempty"`
 }
 
 // glDiffRefs are the base/head/start SHAs GitLab attaches to an MR — needed to
@@ -221,6 +225,10 @@ func (h *GitRemoteHandler) Repos(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if isGitHub(conn) {
+		h.ghRepos(c, userID, conn, token)
+		return
+	}
 	q := url.Values{}
 	q.Set("membership", "true")
 	q.Set("per_page", "50")
@@ -257,6 +265,12 @@ func (h *GitRemoteHandler) Repos(c *gin.Context) {
 func (h *GitRemoteHandler) Branches(c *gin.Context) {
 	userID, conn, token, ok := h.auth(c)
 	if !ok {
+		return
+	}
+	if isGitHub(conn) {
+		if project, ok := requireProject(c); ok {
+			h.ghBranches(c, userID, conn, token, project)
+		}
 		return
 	}
 	project, ok := requireProject(c)
@@ -301,6 +315,12 @@ func (h *GitRemoteHandler) Commits(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if isGitHub(conn) {
+		if project, ok := requireProject(c); ok {
+			h.ghCommits(c, userID, conn, token, project)
+		}
+		return
+	}
 	project, ok := requireProject(c)
 	if !ok {
 		return
@@ -338,6 +358,16 @@ func (h *GitRemoteHandler) Commit(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if isGitHub(conn) {
+		if project, ok := requireProject(c); ok {
+			if sha := strings.TrimSpace(c.Query("sha")); sha != "" {
+				h.ghCommitDetail(c, userID, conn, token, project, sha)
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "sha is required"})
+			}
+		}
+		return
+	}
 	project, ok := requireProject(c)
 	if !ok {
 		return
@@ -366,6 +396,12 @@ func (h *GitRemoteHandler) Commit(c *gin.Context) {
 func (h *GitRemoteHandler) Tree(c *gin.Context) {
 	userID, conn, token, ok := h.auth(c)
 	if !ok {
+		return
+	}
+	if isGitHub(conn) {
+		if project, ok := requireProject(c); ok {
+			h.ghTree(c, userID, conn, token, project)
+		}
 		return
 	}
 	project, ok := requireProject(c)
@@ -404,6 +440,16 @@ func (h *GitRemoteHandler) File(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if isGitHub(conn) {
+		if project, ok := requireProject(c); ok {
+			if path := strings.TrimSpace(c.Query("path")); path != "" {
+				h.ghFileContent(c, userID, conn, token, project, path)
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "path is required"})
+			}
+		}
+		return
+	}
 	project, ok := requireProject(c)
 	if !ok {
 		return
@@ -440,6 +486,17 @@ func (h *GitRemoteHandler) File(c *gin.Context) {
 func (h *GitRemoteHandler) Compare(c *gin.Context) {
 	userID, conn, token, ok := h.auth(c)
 	if !ok {
+		return
+	}
+	if isGitHub(conn) {
+		if project, ok := requireProject(c); ok {
+			from, to := strings.TrimSpace(c.Query("from")), strings.TrimSpace(c.Query("to"))
+			if from == "" || to == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "from and to are required"})
+				return
+			}
+			h.ghCompare(c, userID, conn, token, project, from, to)
+		}
 		return
 	}
 	project, ok := requireProject(c)
@@ -491,6 +548,12 @@ func (h *GitRemoteHandler) Contributors(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if isGitHub(conn) {
+		if project, ok := requireProject(c); ok {
+			h.ghContributors(c, userID, conn, token, project)
+		}
+		return
+	}
 	project, ok := requireProject(c)
 	if !ok {
 		return
@@ -526,20 +589,47 @@ func (h *GitRemoteHandler) MergeRequests(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if isGitHub(conn) {
+		h.ghMergeRequests(c, userID, conn, token, project)
+		return
+	}
 	q := url.Values{}
 	q.Set("per_page", "50")
 	if state := strings.TrimSpace(c.Query("state")); state != "" {
 		q.Set("state", state)
 	}
+	if search := strings.TrimSpace(c.Query("search")); search != "" {
+		q.Set("search", search)
+	}
+	// mine: assigned | created | review (waiting for my review).
+	switch c.Query("mine") {
+	case "assigned":
+		q.Set("scope", "assigned_to_me")
+	case "created":
+		q.Set("scope", "created_by_me")
+	case "review":
+		var me struct {
+			Username string `json:"username"`
+		}
+		if _, ok := h.getJSON(c, token, "/user", nil, &me); !ok {
+			return
+		}
+		q.Set("scope", "all")
+		q.Set("reviewer_username", me.Username)
+	}
 	var raw []struct {
-		IID          int64  `json:"iid"`
-		Title        string `json:"title"`
-		State        string `json:"state"`
-		SourceBranch string `json:"source_branch"`
-		TargetBranch string `json:"target_branch"`
-		WebURL       string `json:"web_url"`
-		CreatedAt    string `json:"created_at"`
-		Author       struct {
+		IID            int64  `json:"iid"`
+		Title          string `json:"title"`
+		State          string `json:"state"`
+		SourceBranch   string `json:"source_branch"`
+		TargetBranch   string `json:"target_branch"`
+		WebURL         string `json:"web_url"`
+		CreatedAt      string `json:"created_at"`
+		UpdatedAt      string `json:"updated_at"`
+		Draft          bool   `json:"draft"`
+		HasConflicts   bool   `json:"has_conflicts"`
+		UserNotesCount int    `json:"user_notes_count"`
+		Author         struct {
 			Name string `json:"name"`
 		} `json:"author"`
 	}
@@ -551,7 +641,8 @@ func (h *GitRemoteHandler) MergeRequests(c *gin.Context) {
 		out = append(out, gitMergeRequest{
 			IID: m.IID, Title: m.Title, State: m.State, SourceBranch: m.SourceBranch,
 			TargetBranch: m.TargetBranch, Author: m.Author.Name, WebURL: m.WebURL,
-			CreatedAt: m.CreatedAt,
+			CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, Draft: m.Draft,
+			HasConflicts: m.HasConflicts, Notes: m.UserNotesCount,
 		})
 	}
 	h.conns.audit(userID, conn.ID, "merge_requests", true, gin.H{"project": project})
@@ -571,6 +662,10 @@ func (h *GitRemoteHandler) MergeRequest(c *gin.Context) {
 	}
 	iid, ok := requireIID(c)
 	if !ok {
+		return
+	}
+	if isGitHub(conn) {
+		h.ghMergeRequest(c, userID, conn, token, project, iid)
 		return
 	}
 	var raw struct {
@@ -618,6 +713,10 @@ func (h *GitRemoteHandler) MergeRequestChanges(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if isGitHub(conn) {
+		h.ghMergeRequestChanges(c, userID, conn, token, project, iid)
+		return
+	}
 	var raw struct {
 		Changes  []glDiff   `json:"changes"`
 		DiffRefs glDiffRefs `json:"diff_refs"`
@@ -645,6 +744,10 @@ func (h *GitRemoteHandler) MergeRequestNotes(c *gin.Context) {
 	}
 	iid, ok := requireIID(c)
 	if !ok {
+		return
+	}
+	if isGitHub(conn) {
+		h.ghMergeRequestNotes(c, userID, conn, token, project, iid)
 		return
 	}
 	q := url.Values{}
@@ -697,6 +800,10 @@ func (h *GitRemoteHandler) CreateMRNote(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "body is required"})
 		return
 	}
+	if isGitHub(conn) {
+		h.ghCreateMRNote(c, userID, conn, token, project, iid, in.Body)
+		return
+	}
 	body, status, err := h.gitlabDo(c, token, http.MethodPost, projectPath(project)+"/merge_requests/"+iid+"/notes", gin.H{"body": in.Body})
 	if err != nil {
 		h.conns.audit(userID, conn.ID, "merge_request_note_create", false, gin.H{"project": project, "iid": iid})
@@ -730,6 +837,10 @@ func (h *GitRemoteHandler) ApproveMR(c *gin.Context) {
 	}
 	iid, ok := requireIID(c)
 	if !ok {
+		return
+	}
+	if isGitHub(conn) {
+		h.ghApproveMR(c, userID, conn, token, project, iid)
 		return
 	}
 	body, status, err := h.gitlabDo(c, token, http.MethodPost, projectPath(project)+"/merge_requests/"+iid+"/approve", nil)
@@ -774,6 +885,17 @@ func (h *GitRemoteHandler) auth(c *gin.Context) (userID string, conn *models.Git
 // back to the caller's linked GitLab OAuth account. h.conns is in the same
 // package, so its cipher decrypts the stored PAT here.
 func (h *GitRemoteHandler) connToken(c *gin.Context, conn *models.GitConnection, userID string) (string, bool) {
+	if isGitHub(conn) {
+		// GitHub connections carry their own token (no "link your GitHub
+		// account" flow yet).
+		if conn.CredentialEnc != "" {
+			if pat, err := h.conns.cipher.Decrypt(conn.CredentialEnc); err == nil && strings.TrimSpace(pat) != "" {
+				return strings.TrimSpace(pat), true
+			}
+		}
+		c.JSON(http.StatusPreconditionFailed, gin.H{"error": "This GitHub connection has no access token — edit it and add a personal access token."})
+		return "", false
+	}
 	if strings.EqualFold(strings.TrimSpace(conn.AuthKind), "pat") && conn.CredentialEnc != "" {
 		if pat, err := h.conns.cipher.Decrypt(conn.CredentialEnc); err == nil && strings.TrimSpace(pat) != "" {
 			// The PAT belongs to the connection's GitLab, which need not be

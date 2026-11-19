@@ -387,6 +387,11 @@ func executeTestCaseSteps(stepsJSON string, envVars map[string]string) execution
 		case "wait":
 			sr = executeWaitStep(step)
 
+		case "":
+			// A manual step (action/expected only): a person performs it,
+			// the runner records it as skipped and goes on.
+			sr = stepResult{StepNo: step.StepNo, Type: "manual", Status: "skipped"}
+
 		default:
 			sr = stepResult{
 				StepNo: step.StepNo,

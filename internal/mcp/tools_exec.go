@@ -22,7 +22,10 @@ import (
 
 // connNote is appended to connection-scoped tool descriptions: it states the
 // id/grant resolution model and the hosted-backend reachability caveat.
-const connNote = " The connection is resolved by id under your grants; a localhost/local-scope connection may be unreachable from a hosted MCP backend."
+// connNote / gitNote used to be appended to every connection / git tool's
+// description (~13 KB of the tool list). Their text now goes once into the
+// server instructions (connectionRules / gitRules, see instructions.go).
+const connNote = ""
 
 // s3PreviewCap bounds the object body s3_get_object returns. We fetch one byte
 // past the cap so an overflow is detectable, then truncate + annotate.
@@ -43,10 +46,10 @@ func registerConnectionDiscoveryTools(s *mcpsdk.Server, c *caller) {
 		reg(s, name, "List the "+kind+" connections you can access (owner + granted). Read-only; returns ids to use with the other tools."+connNote,
 			func(_ struct{}) (int, string) { return c.call("GET", path, nil) })
 	}
-	// Git connections are listed where the git tools run (cloudOrLocal): the
-	// signed-in account's view, incl. whether a GitLab link exists there.
+	// Git connections from this computer and (signed in) the PatchMan server,
+	// merged, each tagged runsOn local|cloud — see gitroute.go.
 	reg(s, "list_git_connections", "List the Git connections you can access (owner + granted). Read-only; returns ids to use with the other tools."+connNote,
-		func(_ struct{}) (int, string) { return c.cloudOrLocal("GET", "/api/git/connections", nil) })
+		func(_ struct{}) (int, string) { return c.listGitConnections(context.Background()) })
 	list("list_db_connections", "/api/db-connections", "database")
 	list("list_es_connections", "/api/es-connections", "Elasticsearch")
 	list("list_redis_connections", "/api/redis-connections", "Redis")
@@ -102,11 +105,12 @@ type runDBQueryIn struct {
 	Limit        *int   `json:"limit,omitempty" jsonschema:"max rows (default 500; 0 = uncapped, owner only)"`
 	Offset       int    `json:"offset,omitempty" jsonschema:"row offset for pagination"`
 	AllowWrite   bool   `json:"allowWrite,omitempty" jsonschema:"set true to run a write (SQL INSERT/UPDATE/DELETE; Mongo insertOne/insertMany/updateOne/updateMany/replaceOne/deleteOne/deleteMany). Also needs read-write enabled on the connection and owner/co-owner access (default false)"`
+	ConfirmCost  bool   `json:"confirmCost,omitempty" jsonschema:"BigQuery only: set true ONLY after the user agreed to the scan size a previous call reported (costConfirm). Never set it on your own"`
 }
 
 func registerDBExecTools(s *mcpsdk.Server, c *caller) {
 	regCtx(s, "run_db_query",
-		"Run a query against a saved DB connection (Postgres/MySQL/SQL Server/Mongo). Read-only by default; a write runs only with allowWrite=true on a connection whose owner enabled read-write (list_db_connections shows allowWrite), and only for its owner or a co-owner. Mongo: updateMany/deleteMany refuse an empty filter."+connNote,
+		"Run a query against a saved DB connection (Postgres/MySQL/SQL Server/Mongo/BigQuery). Read-only by default; a write runs only with allowWrite=true on a connection whose owner enabled read-write (list_db_connections shows allowWrite), and only for its owner or a co-owner. Mongo: updateMany/deleteMany refuse an empty filter. BigQuery: every query is dry-run first; one over the user's scan limit is refused, one over their ask threshold returns costConfirm with the size."+connNote,
 		func(ctx context.Context, in runDBQueryIn) (int, string) {
 			return c.callCtx(ctx, "POST", "/api/db-query/execute", in)
 		})
@@ -120,6 +124,23 @@ type esIDIn struct {
 type esMappingIn struct {
 	ID    string `json:"id" jsonschema:"Elasticsearch connection id"`
 	Index string `json:"index,omitempty" jsonschema:"index name or pattern; empty = all indices"`
+}
+type esDataViewsIn struct {
+	ID         string `json:"id" jsonschema:"Elasticsearch connection id"`
+	DataViewID string `json:"dataViewId,omitempty" jsonschema:"a data view id for its details; empty = list all"`
+	Space      string `json:"space,omitempty" jsonschema:"Kibana space id (default = the connection's space)"`
+}
+type esDataViewSearchIn struct {
+	ID          string `json:"id" jsonschema:"Elasticsearch connection id"`
+	DataViewID  string `json:"dataViewId" jsonschema:"data view id (see es_data_views)"`
+	Space       string `json:"space,omitempty" jsonschema:"Kibana space id (default = the connection's space)"`
+	From        string `json:"from,omitempty" jsonschema:"range start: ISO-8601 or date math like now-1h (default now-15m)"`
+	To          string `json:"to,omitempty" jsonschema:"range end (default now)"`
+	Query       string `json:"query,omitempty" jsonschema:"Lucene query_string, e.g. level:error AND service:api"`
+	Size        int    `json:"size,omitempty" jsonschema:"hits per page (default 50, max 500)"`
+	Histogram   bool   `json:"histogram,omitempty" jsonschema:"also return a time histogram of matching docs"`
+	PitID       string `json:"pitId,omitempty" jsonschema:"pitId from the previous page (paging)"`
+	SearchAfter []any  `json:"searchAfter,omitempty" jsonschema:"the last hit's sort array from the previous page (paging)"`
 }
 type esRequestIn struct {
 	ID         string `json:"id" jsonschema:"Elasticsearch connection id"`
@@ -150,6 +171,37 @@ func registerESTools(s *mcpsdk.Server, c *caller) {
 		"Send a raw Elasticsearch request. Read-only by default; set allowWrite=true for a mutating request, which still requires a write grant."+connNote,
 		func(ctx context.Context, in esRequestIn) (int, string) {
 			return c.callCtx(ctx, "POST", "/api/es/"+url.PathEscape(in.ID)+"/request", in)
+		})
+	regCtx(s, "es_data_views",
+		"List Kibana data views (index patterns on Kibana 7.x / OpenSearch Dashboards) of an Elasticsearch connection — each has an index pattern and a time field. Pass dataViewId for one data view's details (time field + runtime fields). Needs a Kibana URL on the connection (or the 'via Kibana' mode). Read-only."+connNote,
+		func(ctx context.Context, in esDataViewsIn) (int, string) {
+			v := url.Values{}
+			if in.Space != "" {
+				v.Set("space", in.Space)
+			}
+			p := "/api/es/" + url.PathEscape(in.ID) + "/data-views"
+			if in.DataViewID != "" {
+				p += "/" + url.PathEscape(in.DataViewID)
+			}
+			return c.callCtx(ctx, "GET", withQuery(p, v), nil)
+		})
+	regCtx(s, "es_data_view_search",
+		"Search logs/documents through a Kibana data view, like Kibana Discover: the data view's time field filters by from/to (ISO or ES date math, default now-15m..now) and sorts newest first; query is Lucene query_string syntax (empty = all). Returns hits, total and (histogram=true) a time histogram. For the next page pass the previous pitId and the last hit's sort array as searchAfter. Read-only."+connNote,
+		func(ctx context.Context, in esDataViewSearchIn) (int, string) {
+			body := map[string]any{
+				"space": in.Space, "from": in.From, "to": in.To, "query": in.Query,
+				"size": in.Size, "histogram": in.Histogram,
+			}
+			if in.PitID != "" {
+				body["pitId"] = in.PitID
+			}
+			if len(in.SearchAfter) > 0 {
+				body["searchAfter"] = in.SearchAfter
+			}
+			if in.Size == 0 {
+				body["size"] = 50
+			}
+			return c.callCtx(ctx, "POST", "/api/es/"+url.PathEscape(in.ID)+"/data-views/"+url.PathEscape(in.DataViewID)+"/search", body)
 		})
 }
 
@@ -444,7 +496,7 @@ func registerDevToolsTools(s *mcpsdk.Server, c *caller) {
 // gitNote states the git-specific auth model appended to every git tool: the
 // call authenticates as the CALLER's own linked GitLab account (not the
 // connection owner's), and the write tools additionally need a write grant.
-const gitNote = " The git connection is resolved by id under your grants (see list_git_connections). A token connection calls GitLab with its own access token; otherwise the call authenticates as YOUR linked GitLab account (link it in PatchMan Settings first, or the call fails with 412). `project` is a GitLab project: its numeric id or the url-path 'group/repo'."
+const gitNote = ""
 
 type gitReposIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
@@ -453,38 +505,38 @@ type gitReposIn struct {
 
 type gitFileIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	Path         string `json:"path" jsonschema:"file path within the repo"`
 	Ref          string `json:"ref,omitempty" jsonschema:"branch/tag/commit sha (default: the repo's default branch)"`
 }
 
 type gitMRListIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	State        string `json:"state,omitempty" jsonschema:"filter: opened/closed/merged/all (default all)"`
 }
 
 type gitMRIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	IID          int64  `json:"iid" jsonschema:"the merge request IID (the per-project number shown as !N)"`
 }
 
 type gitMRNoteIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	IID          int64  `json:"iid" jsonschema:"the merge request IID (the per-project number shown as !N)"`
 	Body         string `json:"body" jsonschema:"the review comment to post (GitLab-flavored markdown)"`
 }
 
 type gitProjectIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 }
 
 type gitPipelinesIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	Ref          string `json:"ref,omitempty" jsonschema:"only pipelines of this branch or tag"`
 	Status       string `json:"status,omitempty" jsonschema:"only this status: running, pending, success, failed, canceled, skipped, manual, scheduled"`
 	Source       string `json:"source,omitempty" jsonschema:"only this trigger: push, schedule, web, merge_request_event, api, trigger, pipeline"`
@@ -493,62 +545,62 @@ type gitPipelinesIn struct {
 
 type gitPipelineIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	Pipeline     int64  `json:"pipeline" jsonschema:"pipeline id (from git_pipelines)"`
 }
 
 type gitJobIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	Job          int64  `json:"job" jsonschema:"job id (from git_pipeline)"`
 }
 
 type gitJobLogIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	Job          int64  `json:"job" jsonschema:"job id (from git_pipeline)"`
 	Lines        int    `json:"lines,omitempty" jsonschema:"how many lines from the end, 20-3000 (default 300)"`
 }
 
 type gitCIVarsIn struct {
 	ConnectionID  string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project       string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project       string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	IncludeValues bool   `json:"includeValues,omitempty" jsonschema:"also return the values of variables that are neither masked nor hidden (masked / hidden values are never returned)"`
 }
 
 type gitRunPipelineIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	Ref          string `json:"ref" jsonschema:"branch or tag to run the pipeline on"`
 	Variables    []struct {
 		Key   string `json:"key"`
 		Value string `json:"value"`
-	} `json:"variables,omitempty" jsonschema:"extra CI/CD variables for this run"`
+	} `json:"variables,omitempty" jsonschema:"extra CI/CD variables for this run (GitHub: the workflow's inputs)"`
+	Workflow string `json:"workflow,omitempty" jsonschema:"GitHub only: the workflow to dispatch (id or file name, see git_workflows); it must have workflow_dispatch"`
 }
 
 type gitScheduleIn struct {
 	ConnectionID string `json:"connectionId" jsonschema:"target git connection id (see list_git_connections)"`
-	Project      string `json:"project" jsonschema:"GitLab project: numeric id or url-path 'group/repo'"`
+	Project      string `json:"project" jsonschema:"GitLab project (numeric id or 'group/repo') or GitHub repository (numeric id or 'owner/name')"`
 	Schedule     int64  `json:"schedule" jsonschema:"pipeline schedule id (from git_pipeline_schedules)"`
 }
 
 // gitCIWrite is the note on the CI/CD write tools.
-const gitCIWrite = " WRITE: needs a write grant on the git connection and a GitLab token with the api scope (read_api is read-only), plus your GitLab role's rights on the project."
+const gitCIWrite = " WRITE: needs a write grant on the git connection and a token that may write (GitLab: api scope, not read_api; GitHub: Actions write), plus rights on the project."
 
 func gitPath(connID, suffix string, v url.Values) string {
 	return withQuery("/api/git/connections/"+url.PathEscape(connID)+suffix, v)
 }
 
-// Git tools run where the caller's GitLab link lives — the hosted BE when the
-// desktop is signed in (see cloudOrLocal), else in-process.
+// Git tools run where their connection works — per connection, see gitroute.go.
 func registerGitTools(s *mcpsdk.Server, c *caller) {
-	regCtx(s, "git_repos", "List GitLab projects you can access on a git connection. Read-only."+gitNote,
+	regCtx(s, "git_repos", "List the GitLab projects / GitHub repositories you can access on a git connection. Read-only."+gitNote,
 		func(ctx context.Context, in gitReposIn) (int, string) {
 			v := url.Values{}
 			if in.Search != "" {
 				v.Set("search", in.Search)
 			}
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/repos", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/repos", v), nil)
 		})
 	regCtx(s, "git_file", "Read a file's contents (base64) at a ref — for reviewing code in context. Read-only."+gitNote,
 		func(ctx context.Context, in gitFileIn) (int, string) {
@@ -558,44 +610,44 @@ func registerGitTools(s *mcpsdk.Server, c *caller) {
 			if in.Ref != "" {
 				v.Set("ref", in.Ref)
 			}
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/file", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/file", v), nil)
 		})
-	regCtx(s, "git_merge_requests", "List a project's merge requests. Read-only."+gitNote,
+	regCtx(s, "git_merge_requests", "List a project's merge requests (GitHub: pull requests; iid = the PR number). Read-only."+gitNote,
 		func(ctx context.Context, in gitMRListIn) (int, string) {
 			v := url.Values{}
 			v.Set("project", in.Project)
 			if in.State != "" {
 				v.Set("state", in.State)
 			}
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/merge_requests", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/merge_requests", v), nil)
 		})
 	regCtx(s, "git_merge_request", "Get a single merge request: title, description, state, branches, sha + diff_refs. Read-only."+gitNote,
 		func(ctx context.Context, in gitMRIn) (int, string) {
 			v := url.Values{}
 			v.Set("project", in.Project)
 			v.Set("iid", strconv.FormatInt(in.IID, 10))
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/merge_request", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/merge_request", v), nil)
 		})
 	regCtx(s, "git_merge_request_changes", "Get a merge request's per-file diffs (the surface to review) plus diff_refs. Read-only."+gitNote,
 		func(ctx context.Context, in gitMRIn) (int, string) {
 			v := url.Values{}
 			v.Set("project", in.Project)
 			v.Set("iid", strconv.FormatInt(in.IID, 10))
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/merge_request_changes", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/merge_request_changes", v), nil)
 		})
 	regCtx(s, "git_merge_request_notes", "List a merge request's existing comments/notes. Read-only."+gitNote,
 		func(ctx context.Context, in gitMRIn) (int, string) {
 			v := url.Values{}
 			v.Set("project", in.Project)
 			v.Set("iid", strconv.FormatInt(in.IID, 10))
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/merge_request_notes", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/merge_request_notes", v), nil)
 		})
-	regCtx(s, "git_create_merge_request_note", "Post a review comment on a merge request. WRITE: requires a write grant on the git connection (and your GitLab account must have rights on the project)."+gitNote,
+	regCtx(s, "git_create_merge_request_note", "Post a comment on a merge request / pull request. WRITE: requires a write grant on the git connection (and rights on the project at GitLab / GitHub)."+gitNote,
 		func(ctx context.Context, in gitMRNoteIn) (int, string) {
 			v := url.Values{}
 			v.Set("project", in.Project)
 			v.Set("iid", strconv.FormatInt(in.IID, 10))
-			return c.cloudOrLocalCtx(ctx, "POST", gitPath(in.ConnectionID, "/merge_request_notes", v), map[string]string{"body": in.Body})
+			return c.gitCallCtx(ctx, in.ConnectionID, "POST", gitPath(in.ConnectionID, "/merge_request_notes", v), map[string]string{"body": in.Body})
 		})
 	// CI/CD.
 	projQ := func(project string) url.Values {
@@ -614,13 +666,13 @@ func registerGitTools(s *mcpsdk.Server, c *caller) {
 			if in.Page > 1 {
 				v.Set("page", strconv.Itoa(in.Page))
 			}
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/pipelines", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/pipelines", v), nil)
 		})
 	regCtx(s, "git_pipeline", "Get one pipeline with its stages and jobs (status, failure reason, duration), including trigger jobs (kind \"bridge\") with their downstream child / multi-project pipeline (open a same-project child with git_pipeline). Use git_job_log on a failed job to see why; trigger jobs have no log. Read-only."+gitNote,
 		func(ctx context.Context, in gitPipelineIn) (int, string) {
 			v := projQ(in.Project)
 			v.Set("pipeline", strconv.FormatInt(in.Pipeline, 10))
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/pipeline", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/pipeline", v), nil)
 		})
 	regCtx(s, "git_job_log", "Read the end of a CI job's log as plain text (colours and section markers removed). Read-only."+gitNote,
 		func(ctx context.Context, in gitJobLogIn) (int, string) {
@@ -629,11 +681,11 @@ func registerGitTools(s *mcpsdk.Server, c *caller) {
 			if in.Lines > 0 {
 				v.Set("lines", strconv.Itoa(in.Lines))
 			}
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/job_log", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/job_log", v), nil)
 		})
 	regCtx(s, "git_pipeline_schedules", "List a project's scheduled pipelines: cron expression, time zone, branch, next run, active, owner. Read-only."+gitNote,
 		func(ctx context.Context, in gitProjectIn) (int, string) {
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/pipeline_schedules", projQ(in.Project)), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/pipeline_schedules", projQ(in.Project)), nil)
 		})
 	regCtx(s, "git_ci_variables", "List a project's CI/CD variables and those inherited from its groups: key, environment scope, protected / masked / hidden. Values are left out unless includeValues is set, and even then only for variables that are neither masked nor hidden. Needs a write grant on the connection, and GitLab requires the Maintainer role (project) or Maintainer/Owner (group); a level you can't read says so. Read-only."+gitNote,
 		func(ctx context.Context, in gitCIVarsIn) (int, string) {
@@ -641,47 +693,51 @@ func registerGitTools(s *mcpsdk.Server, c *caller) {
 			if in.IncludeValues {
 				v.Set("values", "unmasked")
 			}
-			return c.cloudOrLocalCtx(ctx, "GET", gitPath(in.ConnectionID, "/ci_variables", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/ci_variables", v), nil)
 		})
 	regCtx(s, "git_run_pipeline", "Start a new pipeline on a branch or tag, optionally with extra variables."+gitCIWrite+gitNote,
 		func(ctx context.Context, in gitRunPipelineIn) (int, string) {
-			return c.cloudOrLocalCtx(ctx, "POST", gitPath(in.ConnectionID, "/pipeline_run", projQ(in.Project)), map[string]any{"ref": in.Ref, "variables": in.Variables})
+			return c.gitCallCtx(ctx, in.ConnectionID, "POST", gitPath(in.ConnectionID, "/pipeline_run", projQ(in.Project)), map[string]any{"ref": in.Ref, "variables": in.Variables, "workflow": in.Workflow})
 		})
 	regCtx(s, "git_retry_pipeline", "Retry a pipeline's failed or canceled jobs."+gitCIWrite+gitNote,
 		func(ctx context.Context, in gitPipelineIn) (int, string) {
 			v := projQ(in.Project)
 			v.Set("pipeline", strconv.FormatInt(in.Pipeline, 10))
-			return c.cloudOrLocalCtx(ctx, "POST", gitPath(in.ConnectionID, "/pipeline_retry", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "POST", gitPath(in.ConnectionID, "/pipeline_retry", v), nil)
 		})
 	regCtx(s, "git_cancel_pipeline", "Cancel a running pipeline."+gitCIWrite+gitNote,
 		func(ctx context.Context, in gitPipelineIn) (int, string) {
 			v := projQ(in.Project)
 			v.Set("pipeline", strconv.FormatInt(in.Pipeline, 10))
-			return c.cloudOrLocalCtx(ctx, "POST", gitPath(in.ConnectionID, "/pipeline_cancel", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "POST", gitPath(in.ConnectionID, "/pipeline_cancel", v), nil)
 		})
 	regCtx(s, "git_play_job", "Start a manual job (status manual)."+gitCIWrite+gitNote,
 		func(ctx context.Context, in gitJobIn) (int, string) {
 			v := projQ(in.Project)
 			v.Set("job", strconv.FormatInt(in.Job, 10))
-			return c.cloudOrLocalCtx(ctx, "POST", gitPath(in.ConnectionID, "/job_play", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "POST", gitPath(in.ConnectionID, "/job_play", v), nil)
 		})
 	regCtx(s, "git_retry_job", "Retry one CI job."+gitCIWrite+gitNote,
 		func(ctx context.Context, in gitJobIn) (int, string) {
 			v := projQ(in.Project)
 			v.Set("job", strconv.FormatInt(in.Job, 10))
-			return c.cloudOrLocalCtx(ctx, "POST", gitPath(in.ConnectionID, "/job_retry", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "POST", gitPath(in.ConnectionID, "/job_retry", v), nil)
 		})
-	regCtx(s, "git_play_schedule", "Run a scheduled pipeline now (it keeps its schedule)."+gitCIWrite+gitNote,
+	regCtx(s, "git_play_schedule", "Run a scheduled pipeline now (it keeps its schedule). GitHub: schedule = the workflow id; it dispatches the workflow on the default branch and needs workflow_dispatch."+gitCIWrite+gitNote,
 		func(ctx context.Context, in gitScheduleIn) (int, string) {
 			v := projQ(in.Project)
 			v.Set("schedule", strconv.FormatInt(in.Schedule, 10))
-			return c.cloudOrLocalCtx(ctx, "POST", gitPath(in.ConnectionID, "/schedule_play", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "POST", gitPath(in.ConnectionID, "/schedule_play", v), nil)
 		})
-	regCtx(s, "git_approve_merge_request", "Approve a merge request. WRITE: requires a write grant on the git connection. Needs GitLab's MR Approvals feature; editions without it return 404."+gitNote,
+	regCtx(s, "git_workflows", "GitHub only: list a repository's Actions workflows — id, name, file, crons, whether it can be run by hand (workflow_dispatch) and its input names. Use before git_run_pipeline on GitHub. Read-only."+gitNote,
+		func(ctx context.Context, in gitProjectIn) (int, string) {
+			return c.gitCallCtx(ctx, in.ConnectionID, "GET", gitPath(in.ConnectionID, "/workflows", projQ(in.Project)), nil)
+		})
+	regCtx(s, "git_approve_merge_request", "Approve a merge request / pull request. WRITE: requires a write grant on the git connection. GitLab needs its MR Approvals feature (404 without it); GitHub doesn't let you approve your own pull request."+gitNote,
 		func(ctx context.Context, in gitMRIn) (int, string) {
 			v := url.Values{}
 			v.Set("project", in.Project)
 			v.Set("iid", strconv.FormatInt(in.IID, 10))
-			return c.cloudOrLocalCtx(ctx, "POST", gitPath(in.ConnectionID, "/merge_request_approve", v), nil)
+			return c.gitCallCtx(ctx, in.ConnectionID, "POST", gitPath(in.ConnectionID, "/merge_request_approve", v), nil)
 		})
 }

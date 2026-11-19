@@ -379,3 +379,56 @@ func TestUnlistableVariableHasReason(t *testing.T) {
 		t.Fatalf("got %+v", v)
 	}
 }
+
+// Regression (Kafka dashboard "region"): a query variable that lists nothing
+// must fall back to the saved values with a reason, and a typed custom value
+// must stick instead of being reset to empty.
+func TestEmptyQueryVariableKeepsCustomValue(t *testing.T) {
+	cipher := testCipher(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/label/region/values") {
+			_, _ = w.Write([]byte(`{"status":"success","data":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"buildInfo":{"version":"11.6.0"},"datasources":{"P":{"id":1,"uid":"p","type":"prometheus","meta":{"backend":true}}}}`))
+	}))
+	defer srv.Close()
+	reg := NewRegistry(cipher, nil)
+	conn := models.GrafanaConnection{ID: "k1", URL: srv.URL, AuthKind: "token", TokenEnc: enc(t, cipher, "x")}
+	def := func(current any) []any {
+		d := map[string]any{"name": "region", "type": "query", "datasource": map[string]any{"uid": "p", "type": "prometheus"}, "query": "label_values(region)"}
+		if current != nil {
+			d["current"] = current
+		}
+		return []any{d}
+	}
+	rng, _ := ParseRange("now-1h", "now", time.Now())
+
+	// No saved current: empty list, but free + reason, and R1 typed sticks.
+	vars, err := reg.ResolveVariables(context.Background(), conn, def(nil), map[string]Selection{"region": {Values: []string{"R1"}}}, rng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := vars[0]
+	if !v.Free || !strings.Contains(v.Error, "label_values(region)") || len(v.Current.Values) != 1 || v.Current.Values[0] != "R1" {
+		t.Fatalf("custom value not kept: %+v", v)
+	}
+
+	// Saved current R2 is offered as an option.
+	vars, err = reg.ResolveVariables(context.Background(), conn, def(map[string]any{"text": "R2", "value": "R2"}), nil, rng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := vars[0]; len(v.Options) != 1 || v.Options[0].Value != "R2" || v.Current.Values[0] != "R2" {
+		t.Fatalf("saved value not offered: %+v", v)
+	}
+}
+
+// A listed variable still resets a value its options no longer contain.
+func TestListedVariableResetsUnknownValue(t *testing.T) {
+	rv := ResolvedVar{Type: "custom"}
+	got := pickCurrent(rv, map[string]any{}, Selection{Values: []string{"gone"}}, []Option{{Text: "a", Value: "a"}})
+	if len(got.Values) != 1 || got.Values[0] != "a" {
+		t.Fatalf("got %+v", got)
+	}
+}

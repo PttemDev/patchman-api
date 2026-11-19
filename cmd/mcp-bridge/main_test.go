@@ -140,20 +140,20 @@ func TestBridgeOfflineThenAppStarts(t *testing.T) {
 	up = true
 	mu.Unlock()
 	deadline := time.Now().Add(2 * time.Second)
-	for len(out.lines()) < 5 && time.Now().Before(deadline) {
+	for len(out.lines()) < 7 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	time.Sleep(100 * time.Millisecond) // no second announcement
 	lines = out.lines()
-	if len(lines) != 5 || lines[4] != `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}` {
+	if len(lines) != 7 || lines[4] != `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}` || !strings.Contains(lines[5], "prompts/list_changed") || !strings.Contains(lines[6], "resources/list_changed") {
 		t.Fatalf("after start = %v", lines)
 	}
 	b.handle([]byte(`{"jsonrpc":"2.0","id":9,"method":"tools/list"}`))
 	mu.Lock()
 	got := strings.Join(forwarded, ",")
 	mu.Unlock()
-	if got != "tools/list" || !strings.Contains(out.lines()[5], `"recall"`) {
-		t.Fatalf("forwarded=%s last=%s", got, out.lines()[5])
+	if got != "tools/list" || !strings.Contains(out.lines()[7], `"recall"`) {
+		t.Fatalf("forwarded=%s last=%s", got, out.lines()[7])
 	}
 }
 
@@ -189,4 +189,60 @@ func (s *syncBuffer) lines() []string {
 		}
 	}
 	return out
+}
+
+// An SSE answer is relayed message by message: progress first, result last.
+func TestBridgeRelaysSSE(t *testing.T) {
+	var accept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept = r.Header.Get("X-PatchMan-Stream")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"t\",\"progress\":1}}\n\n" +
+			"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[]}}\n\n"))
+	}))
+	defer srv.Close()
+	var out bytes.Buffer
+	b := &bridge{httpc: srv.Client(), out: bufio.NewWriter(&out),
+		read: func() (mcpdisco.Info, error) { return mcpdisco.Info{URL: srv.URL, Token: "tok"}, nil }}
+	b.handle([]byte(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"run_db_query","_meta":{"progressToken":"t"}}}`))
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if accept != "1" || len(lines) != 2 || !strings.Contains(lines[0], "notifications/progress") || !strings.Contains(lines[1], `"id":3`) {
+		t.Fatalf("stream=%q lines=%q", accept, lines)
+	}
+}
+
+// notifications/cancelled aborts the running call's HTTP request, so the
+// server's request context ends and it stops the work.
+func TestBridgeCancelsInflight(t *testing.T) {
+	stopped := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var env envelope
+		_ = json.NewDecoder(r.Body).Decode(&env)
+		if env.Method == "tools/call" {
+			<-r.Context().Done()
+			close(stopped)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	var out bytes.Buffer
+	b := &bridge{httpc: srv.Client(), out: bufio.NewWriter(&out),
+		read: func() (mcpdisco.Info, error) { return mcpdisco.Info{URL: srv.URL, Token: "tok"}, nil }}
+	done := make(chan struct{})
+	go func() {
+		b.handle([]byte(`{"jsonrpc":"2.0","id":"q1","method":"tools/call","params":{"name":"kafka_consume"}}`))
+		close(done)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	b.handle([]byte(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"q1"}}`))
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server request was not cancelled")
+	}
+	<-done
+	if strings.TrimSpace(out.String()) != "" {
+		t.Errorf("a cancelled request gets no answer: %q", out.String())
+	}
 }

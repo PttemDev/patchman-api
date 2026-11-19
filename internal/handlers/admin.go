@@ -314,21 +314,13 @@ func (h *AdminHandler) ReassignCollection(c *gin.Context) {
 		frontier = next
 	}
 
-	// Stamp the new owner on the collections AND every saved request
-	// under them so the existing owner-only handlers still recognize
-	// the new owner as the rightful caller.
+	// Stamp the new owner on every collection in the tree. Saved requests
+	// carry no owner column: their access follows the collection they sit in.
 	if err := tx.Model(&models.Collection{}).
 		Where("id IN ?", ids).
 		Update("user_id", newOwner.ID).Error; err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reassign collections"})
-		return
-	}
-	if err := tx.Model(&models.SavedRequest{}).
-		Where("collection_id IN ?", ids).
-		Update("user_id", newOwner.ID).Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reassign requests"})
 		return
 	}
 

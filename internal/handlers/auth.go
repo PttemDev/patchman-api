@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"patchman-be/internal/authtoken"
 	"patchman-be/internal/config"
+	"patchman-be/internal/middleware"
 	"patchman-be/internal/models"
 
 	"github.com/gin-gonic/gin"
@@ -87,7 +87,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	token, err := h.generateToken(user.ID)
+	token, err := h.generateToken(c, user.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
 		return
@@ -124,7 +124,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	token, err := h.generateToken(user.ID)
+	token, err := h.generateToken(c, user.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
 		return
@@ -207,6 +207,6 @@ func (h *AuthHandler) SearchUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": results})
 }
 
-func (h *AuthHandler) generateToken(userID string) (string, error) {
-	return authtoken.Mint(h.jwtSecret, userID, h.cfg.SessionTTL)
+func (h *AuthHandler) generateToken(c *gin.Context, userID string) (string, error) {
+	return middleware.MintForRequest(c, h.jwtSecret, userID, "", h.cfg.SessionTTL)
 }

@@ -13,9 +13,9 @@ import (
 type Kind string
 
 const (
-	KindPostgres  Kind = "postgres"
-	KindMySQL     Kind = "mysql"
-	KindMongo     Kind = "mongo"
+	KindPostgres Kind = "postgres"
+	KindMySQL    Kind = "mysql"
+	KindMongo    Kind = "mongo"
 	// Wire-compatible variants — same driver, different default port + UI
 	// label so users see "CockroachDB" rather than "Postgres" when they
 	// connect to one.
@@ -27,6 +27,9 @@ const (
 	// Microsoft SQL Server / Azure SQL — its own driver (go-mssqldb, T-SQL
 	// introspection), not wire-compatible with the Postgres/MySQL families.
 	KindSQLServer Kind = "sqlserver"
+	// Google BigQuery — REST API, service account key or the desktop's
+	// gcloud credentials (driver_bigquery.go).
+	KindBigQuery Kind = "bigquery"
 )
 
 // IsPostgresFamily / IsMySQLFamily lets the registry & drivers fan in
@@ -60,6 +63,9 @@ type ConnectionConfig struct {
 	// field). When non-empty, drivers pass it straight to their underlying
 	// client and ignore Host/Port/Database/Username/Password/Options.
 	ConnectionString string
+	// OwnerID is the connection owner's user id — drivers that sign in with
+	// the owner's shared credential (BigQuery auth "credential") use it.
+	OwnerID string
 }
 
 // ColumnMeta is a single column descriptor in a result. Type names are
@@ -82,12 +88,29 @@ type Row []any
 // clock exceeds it (default 60s applied by the handler).
 type ExecOpts struct {
 	Limit int
+	// BigQuery cost guard (ignored by other drivers). MaxBytes is sent as
+	// maximumBytesBilled — Google refuses a job above it; AskBytes is the
+	// "ask first" threshold: a query whose dry run scans more fails with
+	// *CostConfirmError until the caller re-runs it with CostConfirmed.
+	MaxBytes      int64
+	AskBytes      int64
+	CostConfirmed bool
+	// AllowWrite: the caller may run a write / DDL statement (the handler
+	// has already checked the connection's read-write switch and role).
+	// BigQuery re-checks it against the dry run's statement type.
+	AllowWrite bool
 }
 
 // Cursor walks the result set lazily so a SELECT * over a 10M row table
 // can't OOM the BE — we only hold `Limit` rows of metadata in memory
 // at a time. Drivers internally back this with database/sql.Rows /
 // mongo.Cursor; Close releases whatever the driver allocated.
+// AbsentReporter is implemented by document cursors (Mongo): the columns
+// the last row's document lacks, which the row can only show as null.
+type AbsentReporter interface {
+	LastAbsent() []int
+}
+
 type Cursor interface {
 	Columns() []ColumnMeta
 	Next(ctx context.Context) (Row, error) // nil row + nil err == EOF
@@ -108,16 +131,16 @@ type SchemaTable struct {
 	Name        string         `json:"name"`
 	Columns     []ColumnMeta   `json:"columns"`
 	ForeignKeys []ForeignKey   `json:"foreignKeys,omitempty"` // SQL only
-	Sample      map[string]any `json:"sample,omitempty"`       // mongo only — one document key snapshot
+	Sample      map[string]any `json:"sample,omitempty"`      // mongo only — one document key snapshot
 }
 
 // ForeignKey describes a single FK relationship a column participates
 // in. Used by the FE for "jump to referenced row" affordances.
 type ForeignKey struct {
-	Column        string `json:"column"`
-	TargetSchema  string `json:"targetSchema,omitempty"`
-	TargetTable   string `json:"targetTable"`
-	TargetColumn  string `json:"targetColumn"`
+	Column       string `json:"column"`
+	TargetSchema string `json:"targetSchema,omitempty"`
+	TargetTable  string `json:"targetTable"`
+	TargetColumn string `json:"targetColumn"`
 }
 
 // Schema is the entire DB metadata snapshot for one connection.

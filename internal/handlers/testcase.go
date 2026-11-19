@@ -78,10 +78,7 @@ func (h *TestCaseHandler) Create(c *gin.Context) {
 	if priority == "" {
 		priority = "P2"
 	}
-	tcType := input.Type
-	if tcType == "" {
-		tcType = "manual"
-	}
+	tcType := normalizeTestCaseType(input.Type)
 	status := input.Status
 	if status == "" {
 		status = "draft"
@@ -109,8 +106,8 @@ func (h *TestCaseHandler) Create(c *gin.Context) {
 		Description: input.Description,
 		Priority:    priority,
 		Type:        tcType,
-		Tags:        input.Tags,
-		Steps:       input.Steps,
+		Tags:        normalizeTestCaseTags(input.Tags),
+		Steps:       normalizeTestCaseSteps(input.Steps),
 		Status:      status,
 	}
 
@@ -169,13 +166,13 @@ func (h *TestCaseHandler) Update(c *gin.Context) {
 		updates["priority"] = *input.Priority
 	}
 	if input.Type != nil {
-		updates["type"] = *input.Type
+		updates["type"] = normalizeTestCaseType(*input.Type)
 	}
 	if input.Tags != nil {
-		updates["tags"] = *input.Tags
+		updates["tags"] = normalizeTestCaseTags(*input.Tags)
 	}
 	if input.Steps != nil {
-		updates["steps"] = *input.Steps
+		updates["steps"] = normalizeTestCaseSteps(*input.Steps)
 	}
 	if input.Status != nil {
 		updates["status"] = *input.Status

@@ -82,6 +82,16 @@ func (r *Registry) ResolveVariables(ctx context.Context, conn models.GrafanaConn
 			free = true
 			opts = savedOptions(def)
 		}
+		// A query that lists nothing (empty result, or an editor shape we can't
+		// turn into a query) must not leave an empty, unusable dropdown: offer
+		// the dashboard's saved values and accept typed ones, and say why.
+		if oerr == nil && rv.Type == "query" && len(opts) == 0 {
+			if saved := savedOptions(def); len(saved) > 0 {
+				opts = saved
+			}
+			free = true
+			rv.Error = fmt.Sprintf("the variable query returned no values (%s) — showing the dashboard's saved values", queryHint(def["query"]))
+		}
 		rv.Free = free
 		opts = ApplyRegex(opts, ip.Replace(str(def["regex"])))
 		SortOptions(opts, num(def["sort"]))
@@ -214,6 +224,29 @@ func truthy(v any) bool {
 	return b
 }
 
+// queryHint renders a variable's query for an error message, capped so a long
+// SQL / JSON query doesn't flood the dropdown.
+func queryHint(q any) string {
+	s := ""
+	switch t := q.(type) {
+	case string:
+		s = t
+	case nil:
+	default:
+		if b, err := json.Marshal(t); err == nil {
+			s = string(b)
+		}
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "empty query"
+	}
+	if len(s) > 160 {
+		s = s[:160] + "…"
+	}
+	return "query: " + s
+}
+
 func savedOptions(def map[string]any) []Option {
 	var out []Option
 	if list, ok := def["options"].([]any); ok {
@@ -270,12 +303,24 @@ func stringList(v any) []string {
 	return nil
 }
 
+func hasRealOption(opts []Option) bool {
+	for _, o := range opts {
+		if o.Value != "$__all" {
+			return true
+		}
+	}
+	return false
+}
+
 func pickCurrent(rv ResolvedVar, def map[string]any, sel Selection, opts []Option) VarValue {
 	valid := func(vals []string) bool {
 		if len(vals) == 0 {
 			return false
 		}
-		if rv.Free || rv.Type == "textbox" {
+		// Free-text variables, and ones with nothing to choose from, keep what
+		// the user typed (Grafana's custom value); a listed variable resets a
+		// value its options no longer contain (e.g. after a parent changed).
+		if rv.Free || rv.Type == "textbox" || !hasRealOption(opts) {
 			return true
 		}
 		for _, v := range vals {

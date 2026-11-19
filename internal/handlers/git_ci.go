@@ -151,6 +151,10 @@ func (h *GitRemoteHandler) Pipelines(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if isGitHub(conn) {
+		h.ghPipelines(c, userID, conn, token, project)
+		return
+	}
 	q := url.Values{}
 	q.Set("per_page", "30")
 	q.Set("order_by", "id")
@@ -204,6 +208,10 @@ func (h *GitRemoteHandler) Pipeline(c *gin.Context) {
 	}
 	pid, ok := requirePositive(c, "pipeline")
 	if !ok {
+		return
+	}
+	if isGitHub(conn) {
+		h.ghPipeline(c, userID, conn, token, project, pid)
 		return
 	}
 	var p glPipeline
@@ -437,6 +445,10 @@ func (h *GitRemoteHandler) JobLog(c *gin.Context) {
 	if n > 3000 {
 		n = 3000
 	}
+	if isGitHub(conn) {
+		h.ghJobLog(c, userID, conn, token, project, job, n)
+		return
+	}
 	var meta glJob
 	if _, ok := h.ciGET(c, token, projectPath(project)+"/jobs/"+job, nil, &meta, "Reading the job"); !ok {
 		return
@@ -475,6 +487,10 @@ func (h *GitRemoteHandler) PipelineSchedules(c *gin.Context) {
 	}
 	project, ok := requireProject(c)
 	if !ok {
+		return
+	}
+	if isGitHub(conn) {
+		h.ghPipelineSchedules(c, userID, conn, token, project)
 		return
 	}
 	q := url.Values{}
@@ -597,6 +613,10 @@ func (h *GitRemoteHandler) CIVariables(c *gin.Context) {
 		return
 	}
 	withUnmasked := c.Query("values") == "unmasked"
+	if isGitHub(conn) {
+		h.ghCIVariables(c, userID, conn, token, project, withUnmasked)
+		return
+	}
 	var proj struct {
 		PathWithNamespace string `json:"path_with_namespace"`
 		Namespace         struct {
@@ -645,6 +665,10 @@ func (h *GitRemoteHandler) CIVariable(c *gin.Context) {
 	key := strings.TrimSpace(c.Query("key"))
 	if key == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "key is required"})
+		return
+	}
+	if isGitHub(conn) {
+		h.ghCIVariable(c, userID, conn, token, project, key, strings.TrimSpace(c.Query("group")), strings.TrimSpace(c.Query("scope")))
 		return
 	}
 	path := projectPath(project) + "/variables/" + url.PathEscape(key)
@@ -702,6 +726,12 @@ func (h *GitRemoteHandler) RetryPipeline(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if userID, conn, token, gh, ok := h.ghWriteAuth(c); gh {
+		if ok {
+			h.ghRetryPipeline(c, userID, conn, token, project, pid)
+		}
+		return
+	}
 	h.ciWrite(c, "pipeline_retry", "Retrying a pipeline", projectPath(project)+"/pipelines/"+pid+"/retry", nil, gin.H{"project": project, "pipeline": pid})
 }
 
@@ -713,6 +743,15 @@ func (h *GitRemoteHandler) CancelPipeline(c *gin.Context) {
 	}
 	pid, ok := requirePositive(c, "pipeline")
 	if !ok {
+		return
+	}
+	if userID, conn, token, gh, ok := h.ghWriteAuth(c); gh {
+		if ok {
+			if rp, ok := h.ghRepoPathOrFail(c, conn, token, project); ok {
+				id, _ := strconv.ParseInt(pid, 10, 64)
+				h.ghCIPost(c, userID, conn, token, "pipeline_cancel", rp+"/actions/runs/"+pid+"/cancel", gin.H{"project": project, "pipeline": pid}, id)
+			}
+		}
 		return
 	}
 	h.ciWrite(c, "pipeline_cancel", "Cancelling a pipeline", projectPath(project)+"/pipelines/"+pid+"/cancel", nil, gin.H{"project": project, "pipeline": pid})
@@ -727,6 +766,7 @@ func (h *GitRemoteHandler) RunPipeline(c *gin.Context) {
 	}
 	var in struct {
 		Ref       string `json:"ref"`
+		Workflow  string `json:"workflow"` // GitHub: the workflow to dispatch (id or file name)
 		Variables []struct {
 			Key   string `json:"key"`
 			Value string `json:"value"`
@@ -734,6 +774,24 @@ func (h *GitRemoteHandler) RunPipeline(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&in); err != nil || strings.TrimSpace(in.Ref) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ref is required"})
+		return
+	}
+	if userID, conn, token, gh, ok := h.ghWriteAuth(c); gh {
+		if !ok {
+			return
+		}
+		wf := strings.TrimSpace(in.Workflow)
+		if wf == "" || strings.ContainsAny(wf, "/?#") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Pick the workflow to run (GitHub runs one workflow with workflow_dispatch)."})
+			return
+		}
+		inputs := map[string]string{}
+		for _, v := range in.Variables {
+			if k := strings.TrimSpace(v.Key); k != "" {
+				inputs[k] = v.Value
+			}
+		}
+		h.ghDispatch(c, userID, conn, token, project, wf, strings.TrimSpace(in.Ref), inputs, "pipeline_run")
 		return
 	}
 	body := gin.H{"ref": strings.TrimSpace(in.Ref)}
@@ -759,6 +817,12 @@ func (h *GitRemoteHandler) PlayJob(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if _, _, _, gh, ok := h.ghWriteAuth(c); gh {
+		if ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "GitHub Actions has no manual jobs. A job waiting for approval (an environment's required reviewers) is approved on GitHub."})
+		}
+		return
+	}
 	h.ciWrite(c, "job_play", "Running a manual job", projectPath(project)+"/jobs/"+job+"/play", nil, gin.H{"project": project, "job": job})
 }
 
@@ -772,6 +836,15 @@ func (h *GitRemoteHandler) RetryJob(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if userID, conn, token, gh, ok := h.ghWriteAuth(c); gh {
+		if ok {
+			if rp, ok := h.ghRepoPathOrFail(c, conn, token, project); ok {
+				id, _ := strconv.ParseInt(job, 10, 64)
+				h.ghCIPost(c, userID, conn, token, "job_retry", rp+"/actions/jobs/"+job+"/rerun", gin.H{"project": project, "job": job}, id)
+			}
+		}
+		return
+	}
 	h.ciWrite(c, "job_retry", "Retrying a job", projectPath(project)+"/jobs/"+job+"/retry", nil, gin.H{"project": project, "job": job})
 }
 
@@ -783,6 +856,12 @@ func (h *GitRemoteHandler) PlaySchedule(c *gin.Context) {
 	}
 	sid, ok := requirePositive(c, "schedule")
 	if !ok {
+		return
+	}
+	if userID, conn, token, gh, ok := h.ghWriteAuth(c); gh {
+		if ok {
+			h.ghDispatch(c, userID, conn, token, project, sid, "", nil, "schedule_play")
+		}
 		return
 	}
 	h.ciWrite(c, "schedule_play", "Running a scheduled pipeline", projectPath(project)+"/pipeline_schedules/"+sid+"/play", nil, gin.H{"project": project, "schedule": sid})

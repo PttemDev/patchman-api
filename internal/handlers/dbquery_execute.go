@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"context"
 	"net/http"
 	"sync"
@@ -53,6 +54,9 @@ type dbExecuteInput struct {
 	// AllowWrite is an AI agent's (MCP) explicit opt-in to a write. People in
 	// the app don't send it: turning read-write on is their opt-in.
 	AllowWrite bool `json:"allowWrite"`
+	// ConfirmCost: the user agreed to run a BigQuery query whose dry run
+	// scans more than their "ask first" threshold.
+	ConfirmCost bool `json:"confirmCost"`
 }
 
 type dbExecuteOutput struct {
@@ -64,6 +68,9 @@ type dbExecuteOutput struct {
 	RowsTruncated bool                 `json:"rowsTruncated"`
 	Offset        int                  `json:"offset"`
 	StatementText string               `json:"statementText,omitempty"`
+	// Absent[i] lists the columns row i's document does not have (Mongo);
+	// omitted when every row has every column.
+	Absent [][]int `json:"absent,omitempty"`
 }
 
 func (h *DBQueryExecuteHandler) Execute(c *gin.Context) {
@@ -149,7 +156,7 @@ func (h *DBQueryExecuteHandler) Execute(c *gin.Context) {
 	// Multi-statement support — only for SQL. Mongo is single-call by
 	// design (the intent parser already rejects unquoted `;`).
 	var statements []string
-	if conn.Kind == "postgres" || conn.Kind == "mysql" || conn.Kind == "sqlserver" {
+	if conn.Kind == "postgres" || conn.Kind == "mysql" || conn.Kind == "sqlserver" || conn.Kind == "bigquery" {
 		statements = dbquery.SplitSQL(input.Query)
 	} else {
 		statements = []string{input.Query}
@@ -166,17 +173,41 @@ func (h *DBQueryExecuteHandler) Execute(c *gin.Context) {
 		return
 	}
 
+	execOpts := dbquery.ExecOpts{Limit: limit + input.Offset + 1}
+	if conn.Kind == "bigquery" {
+		execOpts.MaxBytes, execOpts.AskBytes = bigQueryLimits(h.db, userID, conn)
+		execOpts.CostConfirmed = input.ConfirmCost
+		// The read-only gate above already ran (SQL classifier); the driver
+		// re-checks against the dry run's statement type, so a write the
+		// classifier missed still can't run on a read-only connection.
+		execOpts.AllowWrite = conn.AllowWrite && canManage(role) &&
+			(c.GetHeader(mcpClientHeader) != mcpClientHeaderValue || input.AllowWrite)
+	}
 	results := make([]dbExecuteOutput, 0, len(statements))
 	totalRows := 0
 	for stmtIdx, stmt := range statements {
-		cur, err := sess.Execute(ctx, stmt, dbquery.ExecOpts{Limit: limit + input.Offset + 1})
+		cur, err := sess.Execute(ctx, stmt, execOpts)
 		if err != nil {
 			ms := int(time.Since(start).Milliseconds())
 			h.recordHistory(userID, role, conn, input.Query, totalRows, ms, false, err.Error())
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			var confirm *dbquery.CostConfirmError
+			var over *dbquery.CostLimitError
+			switch {
+			case errors.As(err, &confirm):
+				// Not a failure: the user decides. The FE asks and re-runs
+				// with confirmCost; an agent gets the same via nextStep.
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "costConfirm": true, "bytes": confirm.Bytes, "askBytes": confirm.AskBytes})
+			case errors.As(err, &over):
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "costLimit": true, "bytes": over.Bytes, "maxBytes": over.MaxBytes})
+			default:
+				c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			}
 			return
 		}
 		rows := []dbquery.Row{}
+		var absent [][]int
+		anyAbsent := false
+		absentOf, _ := cur.(dbquery.AbsentReporter)
 		truncated := false
 		skipped := 0
 		for {
@@ -200,8 +231,16 @@ func (h *DBQueryExecuteHandler) Execute(c *gin.Context) {
 				break
 			}
 			rows = append(rows, row)
+			if absentOf != nil {
+				a := absentOf.LastAbsent()
+				anyAbsent = anyAbsent || len(a) > 0
+				absent = append(absent, a)
+			}
 		}
 		_ = cur.Close()
+		if !anyAbsent {
+			absent = nil
+		}
 		totalRows += len(rows)
 		results = append(results, dbExecuteOutput{
 			QueryID:       queryID,
@@ -211,6 +250,7 @@ func (h *DBQueryExecuteHandler) Execute(c *gin.Context) {
 			RowsTruncated: truncated,
 			Offset:        input.Offset,
 			StatementText: stmt,
+			Absent:        absent,
 		})
 		_ = stmtIdx
 	}

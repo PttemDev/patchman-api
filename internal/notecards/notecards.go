@@ -121,6 +121,11 @@ var (
 
 var headerNameRE = regexp.MustCompile(`^[A-Za-z][a-z]*(-[A-Za-z][a-z]*)+$`)
 
+// codeRefRE is a qualified code identifier — pkg.Name, obj.Field.Method(),
+// gcpH.BigQueryTokenSource — the value side of an assignment in a code note
+// (dbquery.GCPTokenSource = gcpH.BigQueryTokenSource), not a credential.
+var codeRefRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+\(?$`)
+
 // placeholderValues are what docs write instead of a secret.
 var placeholderValues = map[string]bool{
 	"password": true, "passwd": true, "pass": true, "secret": true, "token": true, "changeme": true, "example": true,
@@ -139,6 +144,9 @@ func secretValue(v string) bool {
 		return false
 	}
 	if headerNameRE.MatchString(v) { // X-Api-Key, X-Refreshed-Token: a name
+		return false
+	}
+	if codeRefRE.MatchString(v) { // gcpH.BigQueryTokenSource: a code reference
 		return false
 	}
 	var lower, upper, digit, symbol bool
@@ -363,8 +371,8 @@ func RenderFor(hits []Hit, budget int, hints []string, terms []string) string {
 	writeHit(hits[0], hintRoom)
 	if body := strings.TrimSpace(hits[0].Body); body != "" && body != hits[0].Line {
 		room := limit - b.Len() - hintRoom - 16
-		if half := limit / 2; room > half {
-			room = half
+		if most := limit / 2; room > most {
+			room = most
 		}
 		if room > 80 {
 			if len(body) > room {
@@ -373,15 +381,56 @@ func RenderFor(hits []Hit, budget int, hints []string, terms []string) string {
 			b.WriteString("---\n" + body + "\n---\n")
 		}
 	}
-	for _, h := range hits[1:] {
+	// The next two hits show the paragraphs that match the question (when
+	// their line doesn't already): the right card ranked second still
+	// carries its answer.
+	listRoom := 0
+	for _, h := range hits[min(3, len(hits)):] {
+		listRoom += len(hitHead(h)) + 1
+	}
+	if listRoom > limit/4 {
+		listRoom = limit / 4
+	}
+	for i, h := range hits[1:] {
 		if !writeHit(h, hintRoom) {
 			break
 		}
+		if i >= 2 || len(terms) == 0 {
+			continue
+		}
+		body := strings.TrimSpace(h.Body)
+		room := limit - b.Len() - hintRoom - listRoom - 16
+		if most := limit / 6; room > most {
+			room = most
+		}
+		if body == "" || body == h.Line || room < 120 || Coverage(body, terms) <= Coverage(h.Title+" "+h.Line, terms) {
+			continue
+		}
+		ex := Excerpt(body, terms, room)
+		if strings.HasPrefix(ex, clipBytes(body, 40)) && len(body) > room && Coverage(ex, terms) == 0 {
+			continue
+		}
+		b.WriteString("  > " + strings.ReplaceAll(ex, "\n", "\n  > ") + "\n")
 	}
 	for _, line := range hintLines {
 		write(line, 0)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// Coverage is the share of terms (lower-case, folded) found in s.
+func Coverage(s string, terms []string) float64 {
+	if len(terms) == 0 {
+		return 0
+	}
+	ls := strings.ToLower(fold(s))
+	n := 0
+	for _, t := range terms {
+		if strings.Contains(ls, t) {
+			n++
+		}
+	}
+	return float64(n) / float64(len(terms))
 }
 
 // hitHead is a hit's "#id title | summary [tags]" line.
@@ -422,7 +471,21 @@ func Excerpt(body string, terms []string, room int) string {
 	if len(body) <= room {
 		return body
 	}
-	paras := strings.Split(body, "\n\n")
+	// Units are paragraphs; one longer than half the room (a long bullet
+	// list) is split into its lines, so a matching bullet isn't lost behind
+	// the list's head.
+	var paras []string
+	for _, p := range strings.Split(body, "\n\n") {
+		if len(p) > room/2 && strings.Contains(p, "\n") {
+			for _, l := range strings.Split(p, "\n") {
+				if strings.TrimSpace(l) != "" {
+					paras = append(paras, l)
+				}
+			}
+			continue
+		}
+		paras = append(paras, p)
+	}
 	type scored struct{ i, n int }
 	var order []scored
 	for i, p := range paras {

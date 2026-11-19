@@ -37,6 +37,7 @@ const (
 	GroupRabbitMQ      = "rabbitmq"
 	GroupObservability = "observability"
 	GroupGraylog       = "graylog"
+	GroupGCP           = "gcp"
 )
 
 // AllGroups is the canonical, ordered list of tool-group keys.
@@ -44,7 +45,7 @@ func AllGroups() []string {
 	return []string{
 		GroupCollections, GroupRequests, GroupEnvironments, GroupTestCases, GroupMocks,
 		GroupConnections, GroupHTTP, GroupDB, GroupES, GroupRedis, GroupKafka, GroupS3, GroupK8s, GroupGit, GroupDevTools,
-		GroupWhiteboards, GroupNotes, GroupGrafana, GroupRabbitMQ, GroupObservability, GroupGraylog,
+		GroupWhiteboards, GroupNotes, GroupGrafana, GroupRabbitMQ, GroupObservability, GroupGraylog, GroupGCP,
 	}
 }
 
@@ -56,8 +57,28 @@ var validGroup = func() map[string]bool {
 	return m
 }()
 
-// IsValidGroup reports whether key is a known tool group.
-func IsValidGroup(key string) bool { return validGroup[key] }
+// PluginGroupPrefix starts the dynamic group of an installed plugin's
+// tools: "plugin:<plugin id>" (PLUGIN_MARKETPLACE_RFC §6.2).
+const PluginGroupPrefix = "plugin:"
+
+// PluginGroup is the tool-group key of a plugin.
+func PluginGroup(pluginID string) string { return PluginGroupPrefix + pluginID }
+
+// PluginInstalled answers whether a plugin group names an installed plugin.
+// Set once at startup by the plugin subsystem; nil = no plugins.
+var PluginInstalled func(pluginID string) bool
+
+// IsValidGroup reports whether key is a known tool group: a built-in group
+// or the group of an installed plugin.
+func IsValidGroup(key string) bool {
+	if validGroup[key] {
+		return true
+	}
+	if id, ok := strings.CutPrefix(key, PluginGroupPrefix); ok && PluginInstalled != nil {
+		return PluginInstalled(id)
+	}
+	return false
+}
 
 // ToolScopes decides which tool groups a token may use. All=true means every
 // group (the default for a token whose scopes were never set — NULL in the DB).

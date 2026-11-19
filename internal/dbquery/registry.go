@@ -62,6 +62,7 @@ func NewRegistry(cipher *services.TokenCipher) *Registry {
 			KindTiDB:      my,
 			KindMongo:     mongo,
 			KindSQLServer: mssql,
+			KindBigQuery:  NewBigQueryDriver(),
 		},
 	}
 	go r.reapLoop()
@@ -107,6 +108,7 @@ func (r *Registry) Session(ctx context.Context, conn models.DBConnection) (Sessi
 		Password:         password,
 		Options:          parseOptions(conn.OptionsJSON),
 		ConnectionString: dsn,
+		OwnerID:          conn.UserID,
 	}
 	sess, err := driver.Connect(ctx, cfg)
 	if err != nil {
@@ -215,6 +217,7 @@ func (r *Registry) TestInfo(ctx context.Context, conn models.DBConnection) (Test
 		Password:         password,
 		Options:          parseOptions(conn.OptionsJSON),
 		ConnectionString: dsn,
+		OwnerID:          conn.UserID,
 	}
 	sess, err := driver.Connect(ctx, cfg)
 	if err != nil {

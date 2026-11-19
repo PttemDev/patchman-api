@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -206,4 +207,130 @@ func (h *ESOpsHandler) audit(c *gin.Context, conn *models.ESConnection, role, ac
 		ErrorText: errText, ExecutedAt: time.Now(),
 	}
 	go func() { _ = h.db.Create(&row).Error }()
+}
+
+// ---- Kibana data views --------------------------------------------------------
+
+// kibanaSpace resolves the ?space= query param: present (even "default") wins,
+// otherwise the connection's configured options.kibanaSpace.
+func kibanaSpaceParam(c *gin.Context, conn *models.ESConnection) (string, error) {
+	if v, ok := c.GetQuery("space"); ok {
+		return esquery.SanitizeSpace(v)
+	}
+	return esquery.ConfiguredSpace(*conn), nil
+}
+
+func kibanaErr(c *gin.Context, err error) {
+	if errors.Is(err, esquery.ErrNoKibana) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "no_kibana"})
+		return
+	}
+	c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+}
+
+// KibanaSpaces lists Kibana spaces (single default space when unsupported).
+func (h *ESOpsHandler) KibanaSpaces(c *gin.Context) {
+	conn, role, ok := h.access(c, false)
+	if !ok {
+		return
+	}
+	if c.Query("refresh") == "1" {
+		h.registry.RefreshKibana(conn.ID)
+	}
+	ctx, cancel := h.ctx(c, 20*time.Second)
+	defer cancel()
+	res, err := h.registry.Spaces(ctx, *conn)
+	h.audit(c, conn, role, "kibana_spaces", "GET", "kibana:/api/spaces/space", err)
+	if err != nil {
+		kibanaErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": res})
+}
+
+// DataViews lists the Kibana data views (index patterns on 7.x) of a space.
+func (h *ESOpsHandler) DataViews(c *gin.Context) {
+	conn, role, ok := h.access(c, false)
+	if !ok {
+		return
+	}
+	space, err := kibanaSpaceParam(c, conn)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if c.Query("refresh") == "1" {
+		h.registry.RefreshKibana(conn.ID)
+	}
+	ctx, cancel := h.ctx(c, 30*time.Second)
+	defer cancel()
+	res, err := h.registry.DataViews(ctx, *conn, space)
+	h.audit(c, conn, role, "dataviews", "GET", "kibana:"+space+"/api/data_views", err)
+	if err != nil {
+		kibanaErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": res})
+}
+
+// DataView returns one data view (time field + runtime fields).
+func (h *ESOpsHandler) DataView(c *gin.Context) {
+	conn, role, ok := h.access(c, false)
+	if !ok {
+		return
+	}
+	space, err := kibanaSpaceParam(c, conn)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	ctx, cancel := h.ctx(c, 20*time.Second)
+	defer cancel()
+	dv, err := h.registry.DataView(ctx, *conn, space, c.Param("dvId"))
+	h.audit(c, conn, role, "dataviews", "GET", "kibana:"+space+"/api/data_views/data_view/"+c.Param("dvId"), err)
+	if err != nil {
+		kibanaErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": dv})
+}
+
+// DataViewSearch runs a Discover-style search over a data view. Read access:
+// it only ever issues _search / _pit.
+func (h *ESOpsHandler) DataViewSearch(c *gin.Context) {
+	conn, role, ok := h.access(c, false)
+	if !ok {
+		return
+	}
+	var input esquery.DataViewSearchRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	space := esquery.ConfiguredSpace(*conn)
+	if input.Space != "" {
+		s, err := esquery.SanitizeSpace(input.Space)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		space = s
+	}
+	ctx, cancel := h.ctx(c, 60*time.Second)
+	defer cancel()
+	dv, err := h.registry.DataView(ctx, *conn, space, c.Param("dvId"))
+	if err != nil {
+		h.audit(c, conn, role, "dataview_search", "POST", "kibana:"+space+"/"+c.Param("dvId"), err)
+		kibanaErr(c, err)
+		return
+	}
+	res, err := h.registry.DataViewSearch(ctx, *conn, *dv, input)
+	if !input.DryRun {
+		h.audit(c, conn, role, "dataview_search", "POST", dv.Pattern+"/_search", err)
+	}
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": res})
 }

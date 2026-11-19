@@ -114,6 +114,54 @@ type PodMetricsHistoryResult struct {
 	CPU        []PromSeriesPoint     `json:"cpu"`
 	Mem        []PromSeriesPoint     `json:"mem"`
 	Containers []PromContainerSeries `json:"containers"`
+	// Resources are the pod spec's requests / limits, drawn as reference lines
+	// on the charts. Nil when the pod couldn't be read.
+	Resources *PodResources `json:"resources,omitempty"`
+}
+
+// PodResources totals the regular containers' requests and limits: CPU in
+// millicores, memory in bytes. A request is the sum of the containers that
+// set one; a limit only exists when every container sets one (otherwise the
+// pod as a whole is unbounded). Nil fields = not set.
+type PodResources struct {
+	CPURequest *float64 `json:"cpuRequest,omitempty"`
+	CPULimit   *float64 `json:"cpuLimit,omitempty"`
+	MemRequest *float64 `json:"memRequest,omitempty"`
+	MemLimit   *float64 `json:"memLimit,omitempty"`
+}
+
+func podResources(pod *corev1.Pod) *PodResources {
+	if pod == nil || len(pod.Spec.Containers) == 0 {
+		return nil
+	}
+	sum := func(get func(c corev1.Container) (corev1.ResourceList, bool), name corev1.ResourceName, cpu, requireAll bool) *float64 {
+		total, seen := 0.0, 0
+		for _, c := range pod.Spec.Containers {
+			list, _ := get(c)
+			q, ok := list[name]
+			if !ok || q.IsZero() {
+				continue
+			}
+			seen++
+			if cpu {
+				total += float64(q.MilliValue())
+			} else {
+				total += float64(q.Value())
+			}
+		}
+		if seen == 0 || (requireAll && seen != len(pod.Spec.Containers)) {
+			return nil
+		}
+		return &total
+	}
+	req := func(c corev1.Container) (corev1.ResourceList, bool) { return c.Resources.Requests, true }
+	lim := func(c corev1.Container) (corev1.ResourceList, bool) { return c.Resources.Limits, true }
+	return &PodResources{
+		CPURequest: sum(req, corev1.ResourceCPU, true, false),
+		CPULimit:   sum(lim, corev1.ResourceCPU, true, true),
+		MemRequest: sum(req, corev1.ResourceMemory, false, false),
+		MemLimit:   sum(lim, corev1.ResourceMemory, false, true),
+	}
 }
 
 // rangeSpec maps a UI range key to a lookback window + query_range step. Steps
@@ -222,6 +270,10 @@ func (r *Registry) PodMetricsHistory(ctx context.Context, conn models.K8sConnect
 	res.Containers = mergeContainerSeries(cpuByC, memByC)
 	res.CPU = sumSeries(cpuByC)
 	res.Mem = sumSeries(memByC)
+	// Best effort: a pod we can't read just gets no reference lines.
+	if podObj, err := p.clientset.CoreV1().Pods(ns).Get(ctx, pod, metav1.GetOptions{}); err == nil {
+		res.Resources = podResources(podObj)
+	}
 	return res, nil
 }
 

@@ -58,7 +58,7 @@ var diagramReadOnlyTools = map[string]bool{
 	"list_db_connections": true, "list_es_connections": true, "list_k8s_connections": true,
 	"list_kafka_connections": true, "list_redis_connections": true, "list_s3_connections": true,
 	"list_collections": true,
-	"es_indices":       true, "es_mapping": true, "es_cluster": true,
+	"es_indices":       true, "es_mapping": true, "es_cluster": true, "es_data_views": true,
 	"k8s_overview": true, "k8s_contexts": true, "k8s_list_resources": true,
 	"kafka_topics": true, "kafka_groups": true, "kafka_lag": true, "kafka_brokers": true,
 	"redis_scan_keys": true, "redis_key_meta": true,

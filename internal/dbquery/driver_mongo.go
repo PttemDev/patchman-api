@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -532,6 +533,9 @@ func (s *mongoSession) Execute(ctx context.Context, q string, opts ExecOpts) (Cu
 		return nil, fmt.Errorf("this connection has no default database — use db.getSiblingDB('name').%s.%s(…)", op.Collection, op.Op)
 	}
 	coll := targetDB.Collection(op.Collection)
+	if verbosity, ok := explainChain(op); ok {
+		return runMongoExplain(ctx, targetDB, op, verbosity)
+	}
 	switch op.Op {
 	case "find":
 		findOpts := options.Find()
@@ -572,7 +576,23 @@ func (s *mongoSession) Execute(ctx context.Context, q string, opts ExecOpts) (Cu
 				findOpts.SetProjection(spec)
 			case "count":
 				runCount = true
-			case "toarray", "pretty":
+			case "hint":
+				h, err := parseHintArg(c.Arg)
+				if err != nil {
+					return nil, err
+				}
+				findOpts.SetHint(h)
+			case "collation":
+				spec, err := parseJSONish(c.Arg)
+				if err != nil {
+					return nil, fmt.Errorf(".collation arg: %w", err)
+				}
+				col, err := toCollation(spec)
+				if err != nil {
+					return nil, err
+				}
+				findOpts.SetCollation(col)
+			case "toarray", "pretty", "explain":
 				// no-op — we already return rows
 			default:
 				return nil, fmt.Errorf("unsupported chained call .%s(...)", c.Method)
@@ -646,6 +666,137 @@ func (s *mongoSession) Execute(ctx context.Context, q string, opts ExecOpts) (Cu
 		return newMongoStaticCursor([]bson.M{row}), nil
 	}
 	return nil, unsupportedMongoOpError(op.Op)
+}
+
+// parseHintArg reads .hint('index_name') or .hint({ field: 1 }).
+func parseHintArg(arg string) (any, error) {
+	a := strings.TrimSpace(arg)
+	if len(a) >= 2 && (a[0] == '\'' || a[0] == '"') && a[len(a)-1] == a[0] {
+		return a[1 : len(a)-1], nil
+	}
+	spec, err := parseJSONish(a)
+	if err != nil {
+		return nil, fmt.Errorf(".hint arg: %w", err)
+	}
+	return spec, nil
+}
+
+// toCollation maps a shell collation document onto the driver's struct.
+func toCollation(spec any) (*options.Collation, error) {
+	m := asM(plainValue(spec))
+	if m == nil {
+		return nil, errors.New(".collation expects a document")
+	}
+	c := &options.Collation{}
+	for k, v := range m {
+		switch k {
+		case "locale":
+			c.Locale, _ = v.(string)
+		case "caseLevel":
+			c.CaseLevel, _ = v.(bool)
+		case "caseFirst":
+			c.CaseFirst, _ = v.(string)
+		case "strength":
+			c.Strength = int(toInt64(v))
+		case "numericOrdering":
+			c.NumericOrdering, _ = v.(bool)
+		case "alternate":
+			c.Alternate, _ = v.(string)
+		case "maxVariable":
+			c.MaxVariable, _ = v.(string)
+		case "normalization":
+			c.Normalization, _ = v.(bool)
+		case "backwards":
+			c.Backwards, _ = v.(bool)
+		default:
+			return nil, fmt.Errorf(".collation: unknown option %q", k)
+		}
+	}
+	if c.Locale == "" {
+		return nil, errors.New(".collation needs a locale")
+	}
+	return c, nil
+}
+
+// explainChain reports a trailing .explain([verbosity]) on find / aggregate.
+// Default verbosity is executionStats (Compass's), which runs the plan; an
+// explain never returns documents and never writes.
+func explainChain(op mongoOp) (string, bool) {
+	if op.Op != "find" && op.Op != "aggregate" {
+		return "", false
+	}
+	for _, c := range op.Chain {
+		if c.Method != "explain" {
+			continue
+		}
+		v := strings.Trim(strings.TrimSpace(c.Arg), `'"`)
+		switch v {
+		case "", "true":
+			return "executionStats", true
+		case "queryPlanner", "executionStats", "allPlansExecution":
+			return v, true
+		}
+		return "executionStats", true
+	}
+	return "", false
+}
+
+// runMongoExplain wraps the find (with its sort/skip/limit/projection
+// chain) or the aggregate in an explain command. The result is one row,
+// column "explain", holding the whole plan document.
+func runMongoExplain(ctx context.Context, db *mongo.Database, op mongoOp, verbosity string) (Cursor, error) {
+	var inner bson.D
+	switch op.Op {
+	case "find":
+		filter := op.Filter
+		if filter == nil {
+			filter = bson.D{}
+		}
+		inner = bson.D{{Key: "find", Value: op.Collection}, {Key: "filter", Value: filter}}
+		if op.Projection != nil {
+			inner = append(inner, bson.E{Key: "projection", Value: op.Projection})
+		}
+		for _, c := range op.Chain {
+			switch c.Method {
+			case "sort", "project", "projection":
+				spec, err := parseJSONish(c.Arg)
+				if err != nil {
+					return nil, fmt.Errorf(".%s arg: %w", c.Method, err)
+				}
+				key := c.Method
+				if key == "project" {
+					key = "projection"
+				}
+				inner = append(inner, bson.E{Key: key, Value: spec})
+			case "limit", "skip":
+				if n, ok := parseIntArg(c.Arg); ok {
+					inner = append(inner, bson.E{Key: c.Method, Value: int64(n)})
+				}
+			case "hint":
+				if h, err := parseHintArg(c.Arg); err == nil {
+					inner = append(inner, bson.E{Key: "hint", Value: h})
+				}
+			case "collation":
+				if spec, err := parseJSONish(c.Arg); err == nil {
+					inner = append(inner, bson.E{Key: "collation", Value: spec})
+				}
+			}
+		}
+	case "aggregate":
+		pipeline, ok := op.Filter.(bson.A)
+		if !ok {
+			return nil, fmt.Errorf("aggregate expects an array pipeline")
+		}
+		inner = bson.D{{Key: "aggregate", Value: op.Collection}, {Key: "pipeline", Value: pipeline}, {Key: "cursor", Value: bson.D{}}}
+	}
+	var plan bson.D
+	if err := db.RunCommand(ctx, bson.D{{Key: "explain", Value: inner}, {Key: "verbosity", Value: verbosity}}).Decode(&plan); err != nil {
+		return nil, fmt.Errorf("explain: %w", err)
+	}
+	return &mongoStaticCursor{
+		docs: []bson.D{{{Key: "explain", Value: plan}}},
+		cols: []ColumnMeta{{Name: "explain", Type: "object"}},
+	}, nil
 }
 
 // runMongoWrite runs one of the write ops and reports what it changed. The
@@ -1210,12 +1361,19 @@ func normalizeShellJSON(s string) string {
 // Mongo cursors (live + static)
 // ──────────────────────────────────────────────────────────────────────
 
+// mongoCursor prefetches the page (limit docs) on the first Next so the
+// columns are the union of every document's keys, in first-seen order —
+// documents in one collection rarely share one shape, and columns taken from
+// the first document alone silently dropped fields that only later documents
+// carry.
 type mongoCursor struct {
-	cur   *mongo.Cursor
-	cols  []ColumnMeta
-	limit int
-	read  int
-	first bson.M
+	cur     *mongo.Cursor
+	cols    []ColumnMeta
+	limit   int
+	docs    []bson.D
+	idx     int
+	fetched bool
+	absent  []int
 }
 
 func newMongoCursor(cur *mongo.Cursor, limit int) Cursor {
@@ -1224,48 +1382,69 @@ func newMongoCursor(cur *mongo.Cursor, limit int) Cursor {
 
 func (c *mongoCursor) Columns() []ColumnMeta {
 	if c.cols == nil {
-		// Zero-row results never trip inferMongoCols — return [] not nil
-		// so the JSON response stays `[]` and the FE doesn't NPE on map.
+		// Zero-row results — return [] not nil so the JSON response stays
+		// `[]` and the FE doesn't NPE on map.
 		return []ColumnMeta{}
 	}
 	return c.cols
 }
 
-func (c *mongoCursor) Next(ctx context.Context) (Row, error) {
-	if c.limit > 0 && c.read >= c.limit {
-		return nil, nil
+func (c *mongoCursor) prefetch(ctx context.Context) error {
+	c.fetched = true
+	for c.limit <= 0 || len(c.docs) < c.limit {
+		if !c.cur.Next(ctx) {
+			if err := c.cur.Err(); err != nil {
+				return err
+			}
+			break
+		}
+		var doc bson.D
+		if err := c.cur.Decode(&doc); err != nil {
+			return err
+		}
+		c.docs = append(c.docs, doc)
 	}
-	if !c.cur.Next(ctx) {
-		if err := c.cur.Err(); err != nil {
+	c.cols = unionMongoCols(c.docs)
+	return nil
+}
+
+func (c *mongoCursor) Next(ctx context.Context) (Row, error) {
+	if !c.fetched {
+		if err := c.prefetch(ctx); err != nil {
 			return nil, err
 		}
+	}
+	if c.idx >= len(c.docs) {
 		return nil, nil
 	}
-	var doc bson.M
-	if err := c.cur.Decode(&doc); err != nil {
-		return nil, err
-	}
-	if c.first == nil {
-		c.first = doc
-		c.cols = inferMongoCols(doc)
-	}
-	c.read++
-	return rowFromDoc(doc, c.cols), nil
+	doc := c.docs[c.idx]
+	c.idx++
+	row, absent := rowFromOrderedDoc(doc, c.cols)
+	c.absent = absent
+	return row, nil
 }
+
+// LastAbsent lists the columns the last row's document does not have (as
+// opposed to having them set to null).
+func (c *mongoCursor) LastAbsent() []int { return c.absent }
 
 func (c *mongoCursor) Close() error {
 	return c.cur.Close(context.Background())
 }
 
 type mongoStaticCursor struct {
-	docs  []bson.M
-	idx   int
-	cols  []ColumnMeta
-	first bool
+	docs   []bson.D
+	idx    int
+	cols   []ColumnMeta
+	absent []int
 }
 
 func newMongoStaticCursor(docs []bson.M) Cursor {
-	return &mongoStaticCursor{docs: docs}
+	ordered := make([]bson.D, 0, len(docs))
+	for _, m := range docs {
+		ordered = append(ordered, mToD(m))
+	}
+	return &mongoStaticCursor{docs: ordered, cols: unionMongoCols(ordered)}
 }
 
 func (c *mongoStaticCursor) Columns() []ColumnMeta {
@@ -1281,29 +1460,96 @@ func (c *mongoStaticCursor) Next(ctx context.Context) (Row, error) {
 	}
 	doc := c.docs[c.idx]
 	c.idx++
-	if !c.first {
-		c.cols = inferMongoCols(doc)
-		c.first = true
-	}
-	return rowFromDoc(doc, c.cols), nil
+	row, absent := rowFromOrderedDoc(doc, c.cols)
+	c.absent = absent
+	return row, nil
 }
+
+func (c *mongoStaticCursor) LastAbsent() []int { return c.absent }
 
 func (c *mongoStaticCursor) Close() error { return nil }
 
-func inferMongoCols(doc bson.M) []ColumnMeta {
-	cols := make([]ColumnMeta, 0, len(doc))
-	for k, v := range doc {
-		cols = append(cols, ColumnMeta{Name: k, Type: bsonTypeName(v)})
+// mToD orders a map's keys (_id first, then alphabetical) — static results
+// are built as maps, which have no order of their own.
+func mToD(m bson.M) bson.D {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if (keys[i] == "_id") != (keys[j] == "_id") {
+			return keys[i] == "_id"
+		}
+		return keys[i] < keys[j]
+	})
+	d := make(bson.D, 0, len(keys))
+	for _, k := range keys {
+		d = append(d, bson.E{Key: k, Value: m[k]})
+	}
+	return d
+}
+
+// unionMongoCols is every key across docs in first-seen order. A key whose
+// type differs between documents is typed "mixed".
+func unionMongoCols(docs []bson.D) []ColumnMeta {
+	var cols []ColumnMeta
+	at := map[string]int{}
+	for _, d := range docs {
+		for _, e := range d {
+			t := bsonTypeName(plainValue(e.Value))
+			if i, ok := at[e.Key]; ok {
+				if cols[i].Type != t && e.Value != nil {
+					if cols[i].Type == bsonTypeName(nil) {
+						cols[i].Type = t
+					} else {
+						cols[i].Type = "mixed"
+					}
+				}
+				continue
+			}
+			at[e.Key] = len(cols)
+			cols = append(cols, ColumnMeta{Name: e.Key, Type: t})
+		}
 	}
 	return cols
 }
 
-func rowFromDoc(doc bson.M, cols []ColumnMeta) Row {
-	out := make(Row, len(cols))
-	for i, c := range cols {
-		out[i] = doc[c.Name]
+func rowFromOrderedDoc(doc bson.D, cols []ColumnMeta) (Row, []int) {
+	m := make(map[string]any, len(doc))
+	for _, e := range doc {
+		m[e.Key] = e.Value
 	}
-	return out
+	out := make(Row, len(cols))
+	var absent []int
+	for i, c := range cols {
+		v, ok := m[c.Name]
+		if !ok {
+			absent = append(absent, i)
+		}
+		out[i] = plainValue(v)
+	}
+	return out, absent
+}
+
+// plainValue turns nested ordered documents (decoding into bson.D makes
+// every sub-document a bson.D too) back into maps, which encode as JSON
+// objects; a bson.D would encode as a list of {Key, Value} pairs.
+func plainValue(v any) any {
+	switch t := v.(type) {
+	case bson.D:
+		m := make(bson.M, len(t))
+		for _, e := range t {
+			m[e.Key] = plainValue(e.Value)
+		}
+		return m
+	case bson.A:
+		out := make(bson.A, len(t))
+		for i, x := range t {
+			out[i] = plainValue(x)
+		}
+		return out
+	}
+	return v
 }
 
 // parseIntArg trims a chain method arg and tries to read it as a

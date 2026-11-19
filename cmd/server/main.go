@@ -4,17 +4,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -28,25 +32,30 @@ import (
 	"patchman-be/internal/errorreport"
 	"patchman-be/internal/esquery"
 	"patchman-be/internal/forwarder"
+	"patchman-be/internal/gcp"
 	"patchman-be/internal/grafanaquery"
 	"patchman-be/internal/graylogquery"
 	"patchman-be/internal/handlers"
 	"patchman-be/internal/k8sclient"
 	"patchman-be/internal/kafkaquery"
-	"patchman-be/internal/rabbitquery"
 	patchmcp "patchman-be/internal/mcp"
 	"patchman-be/internal/mcpdisco"
 	"patchman-be/internal/mcpscope"
 	"patchman-be/internal/middleware"
 	"patchman-be/internal/models"
+	pluginapi "patchman-be/internal/plugins/api"
+	"patchman-be/internal/plugins/pkgsig"
+	"patchman-be/internal/rabbitquery"
 	"patchman-be/internal/realtime"
 	"patchman-be/internal/redisquery"
 	"patchman-be/internal/s3client"
 	"patchman-be/internal/services"
+	"patchman-be/internal/sessions"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/oauth2"
 	"gorm.io/gorm"
 )
 
@@ -68,6 +77,9 @@ type mcpAgentCtxKey struct{}
 
 // mcpProjectCtxKey carries the project the agent works in (bridge header).
 type mcpProjectCtxKey struct{}
+
+// mcpInitCtxKey marks the initialize request (instructions go out only then).
+type mcpInitCtxKey struct{}
 
 // mcpInitializeClient reads the client's name from an MCP initialize request
 // ({"method":"initialize","params":{"clientInfo":{…}}}) without consuming the
@@ -178,8 +190,10 @@ func main() {
 	}
 	r := gin.Default()
 
-	// CORS
-	r.Use(cors.New(cors.Config{
+	// CORS. A hosted BE serves browsers on any origin (JWT-protected). The
+	// embedded desktop BE only answers its own webview (plus an explicit dev
+	// origin) — except /mock/*, which external apps under development call.
+	corsCfg := cors.Config{
 		AllowAllOrigins: true,
 		AllowMethods:    []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"},
 		// X-Act-As-User is required for the admin "Manage as user" mode —
@@ -187,14 +201,53 @@ func main() {
 		// rejects the actual request and the FE sees a status=0 network
 		// error on every impersonated call. Local dev didn't catch this
 		// because Vite proxies /api as same-origin and skips CORS.
-		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With", "X-Act-As-User", "X-Client-Id", "X-Client-Version"},
+		// X-Local-Token carries the desktop launch token (embedded gate).
+		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Requested-With", "X-Act-As-User", "X-Client-Id", "X-Client-Version", middleware.LocalTokenHeader},
 		// X-Refreshed-Token lets the FE read the slid-forward session token
 		// off any response (sliding-session refresh); without exposing it,
 		// browser JS can't see the header cross-origin.
 		ExposeHeaders:    []string{"Content-Length", "Content-Type", middleware.RefreshedTokenHeader},
 		AllowCredentials: false,
 		MaxAge:           86400,
-	}))
+	}
+	if cfg.IsEmbedded() {
+		// Launch token + extra origins come from the desktop shell's env and
+		// are dropped from the environment right away so shells / plugins
+		// this process spawns don't inherit them.
+		launchToken := os.Getenv("PATCHMAN_LAUNCH_TOKEN")
+		extraOrigins := strings.Split(os.Getenv("PATCHMAN_ALLOWED_ORIGINS"), ",")
+		embeddedOrigins = extraOrigins
+		_ = os.Unsetenv("PATCHMAN_LAUNCH_TOKEN")
+		_ = os.Unsetenv("PATCHMAN_ALLOWED_ORIGINS")
+		if launchToken == "" {
+			log.Printf("embedded: PATCHMAN_LAUNCH_TOKEN not set — only health, MCP and mock routes are served")
+		}
+		openCORS := cors.New(corsCfg)
+		strict := corsCfg
+		strict.AllowAllOrigins = false
+		strict.AllowOriginFunc = middleware.EmbeddedOriginAllowed(extraOrigins)
+		strictCORS := cors.New(strict)
+		r.Use(func(c *gin.Context) {
+			if strings.HasPrefix(c.Request.URL.Path, "/mock/") {
+				openCORS(c)
+				return
+			}
+			strictCORS(c)
+		})
+		controlToken := os.Getenv("PATCHMAN_CONTROL_TOKEN")
+		startLocked := os.Getenv("PATCHMAN_START_LOCKED") == "1"
+		_ = os.Unsetenv("PATCHMAN_CONTROL_TOKEN")
+		_ = os.Unsetenv("PATCHMAN_START_LOCKED")
+		// No shell (dev recipe): no lock state to enforce.
+		var localSec *middleware.LocalSecurity
+		if controlToken != "" {
+			localSec = middleware.NewLocalSecurity(controlToken, startLocked)
+			r.POST(middleware.LocalSecurityPath, localSec.Handler)
+		}
+		r.Use(middleware.LocalGate(launchToken, localSec))
+	} else {
+		r.Use(cors.New(corsCfg))
+	}
 
 	// Health probes (no auth)
 	r.GET("/healthz", func(c *gin.Context) {
@@ -218,7 +271,11 @@ func main() {
 	authMW := middleware.JWTAuth(cfg.JWTSecret, cfg.SessionTTL)
 	if cfg.IsEmbedded() {
 		authMW = middleware.LocalUserAuth()
+	} else {
+		// Revocable device sessions (DESKTOP_SECURITY_RFC L8).
+		sessions.Default = sessions.New(db, cfg.SessionIdleTTL)
 	}
+	sessionH := handlers.NewSessionHandler(db)
 
 	// Auth handlers (no middleware)
 	authHandler := handlers.NewAuthHandler(db, cfg, cfg.JWTSecret)
@@ -227,11 +284,16 @@ func main() {
 		authGroup.POST("/register", authHandler.Register)
 		authGroup.POST("/login", authHandler.Login)
 		authGroup.GET("/me", authMW, authHandler.Me)
+		authGroup.GET("/sessions", authMW, sessionH.List)
+		authGroup.DELETE("/sessions/:id", authMW, sessionH.Revoke)
+		authGroup.POST("/sessions/revoke-others", authMW, sessionH.RevokeOthers)
+		authGroup.POST("/logout", authMW, sessionH.Logout)
 		// SSO sign-in (OAuth-via-third-party). Public — these endpoints
 		// run BEFORE the user has a JWT.
 		ssoH := handlers.NewSSOHandler(db, cfg, cfg.JWTSecret)
 		authGroup.POST("/sso/start", ssoH.Start)
 		authGroup.POST("/sso/callback", ssoH.Callback)
+		authGroup.GET("/methods", ssoH.Methods)
 	}
 
 	// Public proxy routes (no auth) — used by anonymous/offline clients to bypass CORS
@@ -270,6 +332,8 @@ func main() {
 		adminGroup.GET("/users/:id/usage", adminH.UserUsage)
 		adminGroup.PUT("/users/:id/role", adminH.SetRole)
 		adminGroup.PUT("/users/:id/password", adminH.ResetPassword)
+		adminGroup.GET("/users/:id/sessions", sessionH.AdminList)
+		adminGroup.POST("/users/:id/sessions/revoke", sessionH.AdminRevokeAll)
 		adminGroup.GET("/stats", adminH.Stats)
 		// Collection ownership transfer (RFC Q8 — used when a user leaves
 		// and someone else needs to take over their public/shared rows).
@@ -341,6 +405,7 @@ func main() {
 	// Claude Memory: knowledge cards, typed links, recall / remember.
 	api.GET("/notes/recall", noteH.Recall)
 	api.POST("/notes/remember", noteH.Remember)
+	api.POST("/notes/forget", noteH.Forget)
 	api.GET("/notes/inbox/:id", noteH.InboxStatus)
 	api.GET("/notes/links/by-uri", noteH.LinksByURI)
 	api.GET("/notes/memory", noteH.MemoryOverview)
@@ -662,8 +727,13 @@ func main() {
 	// with 0600 on first run.
 	tokenKey := cfg.GitLabTokenEncKey
 	if tokenKey == "" && cfg.IsEmbedded() && cfg.DBDriver == "sqlite" {
-		if k, err := ensureEmbeddedCipherKey(cfg.DBPath); err == nil {
+		// The desktop shell passes the Keychain copy of the key (RFC L5).
+		envKey := strings.TrimSpace(os.Getenv("PATCHMAN_CIPHER_KEY"))
+		_ = os.Unsetenv("PATCHMAN_CIPHER_KEY")
+		if k, err := ensureEmbeddedCipherKey(cfg.DBPath, envKey); err == nil {
 			tokenKey = k
+		} else {
+			log.Printf("embedded: %v", err)
 		}
 	}
 
@@ -688,6 +758,9 @@ func main() {
 			registry := dbquery.NewRegistry(dbCipher)
 			connH := handlers.NewDBConnectionHandler(db, dbCipher, registry)
 			execH := handlers.NewDBQueryExecuteHandler(db, registry, connH)
+			bqSettings := handlers.NewBigQuerySettingsHandler(db)
+			api.GET("/settings/bigquery", bqSettings.Get)
+			api.PUT("/settings/bigquery", bqSettings.Put)
 			grantH := handlers.NewDBGrantHandler(db)
 			savedH := handlers.NewDBSavedQueryHandler(db)
 			histH := handlers.NewDBHistoryHandler(db)
@@ -712,6 +785,12 @@ func main() {
 			// Execute + cancel
 			api.POST("/db-query/execute", execH.Execute)
 			api.POST("/db-query/cancel", execH.Cancel)
+			// Mongo indexes (Compass-style Indexes view)
+			api.GET("/db-connections/:id/mongo/indexes", execH.MongoIndexes)
+			api.POST("/db-connections/:id/mongo/indexes", execH.MongoCreateIndex)
+			api.POST("/db-connections/:id/mongo/indexes/drop", execH.MongoDropIndex)
+			api.POST("/db-connections/:id/mongo/indexes/hide", execH.MongoHideIndex)
+			api.POST("/db-connections/:id/mongo/aggregate-preview", execH.MongoAggregatePreview)
 
 			// Saved queries + history
 			api.GET("/saved-db-queries", savedH.List)
@@ -812,6 +891,15 @@ func main() {
 			api.POST("/s3/:id/presign", sObjH.Presign)
 			api.POST("/s3/:id/folder", sObjH.CreateFolder)
 
+			// Plugins (PLUGIN_MARKETPLACE_RFC §15): sandboxed wasm backends
+			// on the shared connection backbone, step-up and MCP hooks.
+			if svc, err := pluginapi.New(db, dbCipher, pluginOptions(cfg)); err != nil {
+				log.Printf("plugins disabled: %v", err)
+			} else {
+				svc.Mount(api)
+				svc.MountUI(r, append(append([]string{}, pluginapi.DefaultFrameAncestors...), embeddedExtraOrigins()...))
+			}
+
 			// Redis tool. Mirrors the Kafka/S3 pattern: encrypted endpoint
 			// credentials + delegated grants + activity audit; SCAN-only
 			// browse, type-aware value view, guarded command console,
@@ -869,6 +957,11 @@ func main() {
 			api.GET("/es/:id/aliases", esOpsH.Aliases)
 			api.GET("/es/:id/mapping", esOpsH.Mapping)
 			api.POST("/es/:id/request", esOpsH.Request)
+			// Kibana data views (8.x) / index patterns (7.x): list + Discover search.
+			api.GET("/es/:id/kibana/spaces", esOpsH.KibanaSpaces)
+			api.GET("/es/:id/data-views", esOpsH.DataViews)
+			api.GET("/es/:id/data-views/:dvId", esOpsH.DataView)
+			api.POST("/es/:id/data-views/:dvId/search", esOpsH.DataViewSearch)
 
 			// Grafana — native dashboards from Grafana's HTTP API (no iframe).
 			grafanaReg := grafanaquery.NewRegistry(dbCipher, nil)
@@ -967,6 +1060,41 @@ func main() {
 			// the pod-log SSE stream. No create/patch/delete/exec/apply
 			// surface exists in v1. Every rest.Config has ExecProvider forced
 			// nil (exec-credential-plugin RCE guard). Reuses dbCipher.
+			// Google Cloud: shared credentials + Storage / Pub/Sub / Logging /
+			// GKE (GOOGLE_CLOUD_RFC.md). GCP_API_BASE points every Google API
+			// at one fake / emulator (tests, local runs).
+			gcpH := handlers.NewGCPHandler(db, dbCipher, cfg)
+			if base := strings.TrimSpace(os.Getenv("GCP_API_BASE")); base != "" {
+				log.Printf("gcp: using %s instead of the Google APIs (GCP_API_BASE)", base)
+				gcp.UseEndpoint(base)
+			}
+			k8sclient.GCPTokenSource = func(owner, cred string) (oauth2.TokenSource, error) {
+				return gcpH.TokenSourceFor(owner, cred, gcp.ScopeCloud)
+			}
+			// BigQuery DB connections with auth "credential" sign in with the
+			// owner's shared credential the same way.
+			dbquery.GCPTokenSource = gcpH.BigQueryTokenSource
+			api.GET("/gcp/credentials", gcpH.List)
+			api.POST("/gcp/credentials", gcpH.Create)
+			api.PATCH("/gcp/credentials/:id", gcpH.Update)
+			api.DELETE("/gcp/credentials/:id", gcpH.Delete)
+			api.POST("/gcp/credentials/:id/test", gcpH.Test)
+			api.GET("/gcp/credentials/:id/projects", gcpH.Projects)
+			api.GET("/gcp/adc", gcpH.ADC)
+			api.POST("/gcp/oauth/start", gcpH.OAuthStart)
+			api.POST("/gcp/oauth/complete", gcpH.OAuthComplete)
+			api.GET("/gcp/credentials/:id/gcs/buckets", gcpH.Buckets)
+			api.GET("/gcp/credentials/:id/gcs/objects", gcpH.Objects)
+			api.GET("/gcp/credentials/:id/gcs/object", gcpH.Object)
+			api.POST("/gcp/credentials/:id/gcs/upload", gcpH.Upload)
+			api.DELETE("/gcp/credentials/:id/gcs/object", gcpH.DeleteObject)
+			api.GET("/gcp/credentials/:id/pubsub/topics", gcpH.Topics)
+			api.GET("/gcp/credentials/:id/pubsub/subscriptions", gcpH.Subscriptions)
+			api.POST("/gcp/credentials/:id/pubsub/peek", gcpH.Peek)
+			api.POST("/gcp/credentials/:id/pubsub/publish", gcpH.Publish)
+			api.POST("/gcp/credentials/:id/logging/entries", gcpH.Logs)
+			api.GET("/gcp/credentials/:id/gke/clusters", gcpH.Clusters)
+			api.POST("/gcp/credentials/:id/gke/clusters", gcpH.AddCluster)
 			k8sReg := k8sclient.NewRegistry(dbCipher, cfg.Mode == config.ModeEmbedded)
 			k8sPF := k8sclient.NewPFRegistry()
 			k8sConnH := handlers.NewK8sConnectionHandler(db, dbCipher, k8sReg)
@@ -1084,12 +1212,25 @@ func main() {
 			gitGroup.GET("/connections/:id/merge_request_notes", gitRemoteH.MergeRequestNotes)
 			gitGroup.POST("/connections/:id/merge_request_notes", gitRemoteH.CreateMRNote)
 			gitGroup.POST("/connections/:id/merge_request_approve", gitRemoteH.ApproveMR)
+			gitGroup.POST("/connections/:id/merge_request_unapprove", gitRemoteH.UnapproveMR)
+			gitGroup.POST("/connections/:id/merge_request_create", gitRemoteH.CreateMR)
+			gitGroup.POST("/connections/:id/merge_request_update", gitRemoteH.UpdateMR)
+			gitGroup.POST("/connections/:id/merge_request_merge", gitRemoteH.MergeMR)
+			gitGroup.POST("/connections/:id/merge_request_rebase", gitRemoteH.RebaseMR)
+			gitGroup.GET("/connections/:id/merge_request_discussions", gitRemoteH.MRDiscussions)
+			gitGroup.POST("/connections/:id/merge_request_discussion", gitRemoteH.CreateMRDiscussion)
+			gitGroup.POST("/connections/:id/merge_request_discussion_reply", gitRemoteH.ReplyMRDiscussion)
+			gitGroup.POST("/connections/:id/merge_request_discussion_resolve", gitRemoteH.ResolveMRDiscussion)
+			gitGroup.GET("/connections/:id/merge_request_approvals", gitRemoteH.MRApprovals)
+			gitGroup.GET("/connections/:id/merge_request_pipelines", gitRemoteH.MRPipelines)
+			gitGroup.GET("/connections/:id/project_members", gitRemoteH.ProjectMembers)
 			// CI/CD: pipelines, jobs, logs, schedules, variables (read —
 			// variables need a write grant), run / retry / cancel / play (write).
 			gitGroup.GET("/connections/:id/pipelines", gitRemoteH.Pipelines)
 			gitGroup.GET("/connections/:id/pipeline", gitRemoteH.Pipeline)
 			gitGroup.GET("/connections/:id/job_log", gitRemoteH.JobLog)
 			gitGroup.GET("/connections/:id/pipeline_schedules", gitRemoteH.PipelineSchedules)
+			gitGroup.GET("/connections/:id/workflows", gitRemoteH.Workflows)
 			gitGroup.GET("/connections/:id/ci_variables", gitRemoteH.CIVariables)
 			gitGroup.GET("/connections/:id/ci_variable", gitRemoteH.CIVariable)
 			gitGroup.POST("/connections/:id/pipeline_run", gitRemoteH.RunPipeline)
@@ -1102,6 +1243,7 @@ func main() {
 			// real bodies land in Wave 2 — signatures are frozen)
 			gitGroup.POST("/connections/:id/clone", gitOps.Clone)
 			gitGroup.GET("/repos", gitOps.ListRepos)
+			gitGroup.POST("/repos/open", gitOps.OpenFolder)
 			gitGroup.GET("/repos/:repoId/status", gitOps.Status)
 			gitGroup.GET("/repos/:repoId/log", gitOps.Log)
 			gitGroup.GET("/repos/:repoId/branches", gitOps.Branches)
@@ -1114,6 +1256,39 @@ func main() {
 			gitGroup.GET("/repos/:repoId/file", gitOps.LocalFile)
 			gitGroup.POST("/repos/:repoId/file", gitOps.WriteFile)
 			gitGroup.GET("/repos/:repoId/local-path", gitOps.RevealPath)
+			// Branch / remote / update surface (GIT_IDE_PLAN P1)
+			gitGroup.GET("/repos/:repoId/state", gitOps.State)
+			gitGroup.GET("/repos/:repoId/refs", gitOps.Refs)
+			gitGroup.POST("/repos/:repoId/fetch", gitOps.Fetch)
+			gitGroup.POST("/repos/:repoId/checkout", gitOps.Checkout)
+			gitGroup.POST("/repos/:repoId/branches", gitOps.CreateBranch)
+			gitGroup.POST("/repos/:repoId/branches/rename", gitOps.RenameBranch)
+			gitGroup.POST("/repos/:repoId/branches/delete", gitOps.DeleteBranch)
+			gitGroup.POST("/repos/:repoId/branches/force-delete", gitOps.ForceDeleteBranch)
+			gitGroup.POST("/repos/:repoId/branches/update", gitOps.UpdateBranch)
+			gitGroup.POST("/repos/:repoId/branches/upstream", gitOps.SetUpstream)
+			gitGroup.GET("/repos/:repoId/compare", gitOps.Compare)
+			gitGroup.GET("/repos/:repoId/diff-worktree", gitOps.DiffWorkTree)
+			gitGroup.POST("/repos/:repoId/remote-branches/delete", gitOps.DeleteRemoteBranch)
+			gitGroup.POST("/repos/:repoId/tags/delete", gitOps.DeleteTag)
+			gitGroup.POST("/repos/:repoId/worktrees", gitOps.AddWorktree)
+			gitGroup.POST("/repos/:repoId/merge", gitOps.Merge)
+			gitGroup.POST("/repos/:repoId/rebase", gitOps.Rebase)
+			gitGroup.POST("/repos/:repoId/operation", gitOps.Operation)
+			gitGroup.GET("/repos/:repoId/remotes", gitOps.Remotes)
+			gitGroup.POST("/repos/:repoId/remotes", gitOps.AddRemote)
+			gitGroup.POST("/repos/:repoId/remotes/update", gitOps.UpdateRemote)
+			gitGroup.POST("/repos/:repoId/remotes/delete", gitOps.DeleteRemote)
+			gitGroup.GET("/repos/:repoId/outgoing", gitOps.Outgoing)
+			gitGroup.GET("/repos/:repoId/commit-files", gitOps.CommitFiles)
+			gitGroup.POST("/repos/:repoId/push-to", gitOps.PushTo)
+			gitGroup.POST("/repos/:repoId/push-to/force", gitOps.ForcePushTo)
+			gitGroup.GET("/repos/:repoId/ls", gitOps.LsDir)
+			gitGroup.GET("/repos/:repoId/blame", gitOps.Blame)
+			gitGroup.POST("/repos/:repoId/fs", gitOps.FsOp)
+			gitGroup.GET("/repos/:repoId/grep", gitOps.Grep)
+			gitGroup.GET("/repos/:repoId/files", gitOps.Files)
+			gitGroup.GET("/repos/:repoId/symbols", gitOps.Symbols)
 		}
 	}
 
@@ -1150,19 +1325,37 @@ func main() {
 	// Bearer pmcp_…) and then runs every tool call in-process as that
 	// user. Stateless + JSON responses keep it simple and curl-friendly
 	// while remaining compatible with Inspector and Claude.
-	mcpStream := mcpsdk.NewStreamableHTTPHandler(
-		func(req *http.Request) *mcpsdk.Server {
-			userID, _ := req.Context().Value(mcpUserCtxKey{}).(string)
-			if userID == "" {
-				return nil
-			}
-			scopes, _ := req.Context().Value(mcpScopesCtxKey{}).(*string)
-			agent, _ := req.Context().Value(mcpAgentCtxKey{}).(string)
-			project, _ := req.Context().Value(mcpProjectCtxKey{}).(string)
-			return patchmcp.BuildServerAs(r, cfg.JWTSecret, userID, mcpscope.Parse(scopes), agent, project)
-		},
-		&mcpsdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
-	)
+	patchmcp.SetEmbedded(cfg.IsEmbedded())
+	handlers.SetEmbeddedMode(cfg.IsEmbedded())
+	// BigQuery: an admin ceiling no per-user / per-connection scan limit can
+	// exceed (e.g. "100GB"); unset = none (GOOGLE_CLOUD_RFC.md ADR-3).
+	handlers.SetBigQueryCeiling(handlers.ParseByteSize(os.Getenv("BIGQUERY_MAX_BYTES_CEILING")))
+	// BIGQUERY_API_BASE points BigQuery at an emulator / test server instead
+	// of Google (no Google auth is sent then). Unset in real use.
+	if base := strings.TrimSpace(os.Getenv("GITHUB_API_BASE")); base != "" {
+		log.Printf("github: using %s instead of the GitHub API (GITHUB_API_BASE)", base)
+		handlers.SetGitHubAPIBase(base)
+	}
+	if base := strings.TrimSpace(os.Getenv("BIGQUERY_API_BASE")); base != "" {
+		log.Printf("bigquery: using %s instead of Google (BIGQUERY_API_BASE)", base)
+		dbquery.UseBigQueryEndpoint(strings.TrimRight(base, "/"), &http.Client{Timeout: 5 * time.Minute})
+	}
+	mcpServerFor := func(req *http.Request) *mcpsdk.Server {
+		userID, _ := req.Context().Value(mcpUserCtxKey{}).(string)
+		if userID == "" {
+			return nil
+		}
+		scopes, _ := req.Context().Value(mcpScopesCtxKey{}).(*string)
+		agent, _ := req.Context().Value(mcpAgentCtxKey{}).(string)
+		project, _ := req.Context().Value(mcpProjectCtxKey{}).(string)
+		isInit, _ := req.Context().Value(mcpInitCtxKey{}).(bool)
+		return patchmcp.BuildServerFor(r, cfg.JWTSecret, userID, mcpscope.Parse(scopes), agent, project, isInit)
+	}
+	mcpStream := mcpsdk.NewStreamableHTTPHandler(mcpServerFor, &mcpsdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	// The same endpoint answering as an SSE stream (X-PatchMan-Stream: 1, sent
+	// by the stdio bridge): progress notifications reach the client while a
+	// long tool call runs. JSON stays the default for curl / other clients.
+	mcpStreamSSE := mcpsdk.NewStreamableHTTPHandler(mcpServerFor, &mcpsdk.StreamableHTTPOptions{Stateless: true})
 	r.Any("/api/mcp", func(c *gin.Context) {
 		tok, ok := handlers.ResolveMCPTokenInfo(db, parseBearer(c.GetHeader("Authorization")))
 		userID, scopes := tok.UserID, tok.Scopes
@@ -1179,7 +1372,9 @@ func main() {
 		// The agent names itself only on initialize (MCP is stateless here):
 		// keep that name on the token so later tool calls can sign with it.
 		agent := tok.ClientName
+		isInit := false
 		if name, ok := mcpInitializeClient(c); ok {
+			isInit = true
 			agent = name
 			handlers.RecordMCPClient(db, tok.ID, name)
 		}
@@ -1193,6 +1388,11 @@ func main() {
 		ctx = context.WithValue(ctx, mcpScopesCtxKey{}, scopes)
 		ctx = context.WithValue(ctx, mcpAgentCtxKey{}, agent)
 		ctx = context.WithValue(ctx, mcpProjectCtxKey{}, patchmcp.CleanProject(c.GetHeader(patchmcp.ProjectHeader)))
+		ctx = context.WithValue(ctx, mcpInitCtxKey{}, isInit)
+		if c.GetHeader("X-PatchMan-Stream") == "1" {
+			mcpStreamSSE.ServeHTTP(c.Writer, c.Request.WithContext(ctx))
+			return
+		}
 		mcpStream.ServeHTTP(c.Writer, c.Request.WithContext(ctx))
 	})
 
@@ -1290,7 +1490,7 @@ func main() {
 			webOrigin = strings.TrimRight(cfg.AllowedRedirectOrigins[0], "/")
 		}
 		c.JSON(http.StatusOK, gin.H{
-			"webOrigin":              webOrigin,
+			"webOrigin": webOrigin,
 			// `service` is the identity marker a client uses to confirm this is
 			// really a PatchMan backend (not just any URL that returns 200) —
 			// and `apiVersion` is the contract version it checks against its own
@@ -1331,7 +1531,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to bind %s: %v", addr, err)
 	}
-	if cfg.IsEmbedded() {
+	// PATCHMAN_NO_MCP_DISCOVERY=1 keeps a scratch / test embedded backend out
+	// of the machine-wide discovery file, so the user's MCP bridges stay on
+	// their real PatchMan (a scratch BE once took them over, 2026-11-17).
+	if cfg.IsEmbedded() && os.Getenv("PATCHMAN_NO_MCP_DISCOVERY") == "1" {
+		log.Printf("mcp: discovery file disabled (PATCHMAN_NO_MCP_DISCOVERY=1)")
+	} else if cfg.IsEmbedded() {
 		disco := mcpdisco.Info{
 			URL:       "http://" + normalizeHost(addr) + "/api/mcp",
 			Token:     localToken,
@@ -1355,17 +1560,63 @@ func main() {
 }
 
 // ensureEmbeddedCipherKey returns a stable base64 AES-256 key for the
-// TokenCipher when the embedded BE has none configured. The key lives
-// next to the SQLite DB as `<db>.cipher.key` (mode 0600) so reads /
-// writes / restarts share the same secret. On first call we create the
-// file with 32 random bytes from crypto/rand.
-func ensureEmbeddedCipherKey(dbPath string) (string, error) {
+// TokenCipher when the embedded BE has none configured. Order:
+//  1. `<db>.cipher.key` (0600) when present — an existing file always wins,
+//     even over a differing envKey, so stored secrets stay decryptable;
+//  2. envKey — the desktop shell's Keychain copy (DESKTOP_SECURITY_RFC L5),
+//     never written to disk;
+//  3. `<db>.cipher.key.bak` — left by the Keychain migration, used when the
+//     Keychain can't be read (e.g. a dev build with another signature);
+//  4. a fresh 32-byte key written to `<db>.cipher.key` (first run, no shell).
+//
+// `<db>.cipher.kid` pins which key this DB's secrets were sealed with (a
+// SHA-256 fingerprint, not secret). Once it exists, sources 2–4 are only
+// used when they match it: a wrong or lost Keychain key never replaces the
+// real one, and no new key is minted over existing secrets — the BE then
+// starts without the cipher (secret-backed tools stay off) instead of
+// sealing new data with a key the old data can't be read with. This is what
+// makes deleting the key file safe.
+func ensureEmbeddedCipherKey(dbPath, envKey string) (string, error) {
 	keyPath := dbPath + ".cipher.key"
-	if b, err := os.ReadFile(keyPath); err == nil {
-		s := strings.TrimSpace(string(b))
-		if s != "" {
-			return s, nil
+	kidPath := dbPath + ".cipher.kid"
+	read := func(p string) string {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return ""
 		}
+		return strings.TrimSpace(string(b))
+	}
+	kid := read(kidPath)
+	pin := func(k string) (string, error) {
+		if kid == "" {
+			_ = os.WriteFile(kidPath, []byte(cipherKeyID(k)), 0o600)
+		}
+		return k, nil
+	}
+	if s := read(keyPath); s != "" {
+		if envKey != "" && envKey != s {
+			log.Printf("embedded: Keychain cipher key differs from %s — using the file", keyPath)
+		}
+		if kid != "" && cipherKeyID(s) != kid {
+			log.Printf("embedded: %s does not match %s — using the file", keyPath, kidPath)
+		}
+		return pin(s)
+	}
+	matches := func(k string) bool { return kid == "" || cipherKeyID(k) == kid }
+	if envKey != "" {
+		if matches(envKey) {
+			return pin(envKey)
+		}
+		log.Printf("embedded: Keychain cipher key does not match %s — ignored", kidPath)
+	}
+	if s := read(keyPath + ".bak"); s != "" {
+		if matches(s) {
+			return pin(s)
+		}
+		log.Printf("embedded: %s.bak does not match %s — ignored", keyPath, kidPath)
+	}
+	if kid != "" {
+		return "", fmt.Errorf("cipher key for this database not found (Keychain unreadable and no %s) — secret-backed tools disabled", keyPath)
 	}
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -1375,13 +1626,74 @@ func ensureEmbeddedCipherKey(dbPath string) (string, error) {
 	if err := os.WriteFile(keyPath, []byte(encoded), 0o600); err != nil {
 		return "", err
 	}
-	return encoded, nil
+	return pin(encoded)
+}
+
+// cipherKeyID is the non-secret fingerprint stored in `<db>.cipher.kid`.
+func cipherKeyID(k string) string {
+	sum := sha256.Sum256([]byte("patchman-cipher-kid:" + strings.TrimSpace(k)))
+	return hex.EncodeToString(sum[:16])
 }
 
 // mcpLocalTokenName is the fixed marker name for the embedded local user's
 // MCP token row. EnsureLocalMCPToken keys on it so regeneration updates the
 // same row rather than orphaning old ones.
 const mcpLocalTokenName = "Local (desktop bridge)"
+
+// embeddedOrigins: PATCHMAN_ALLOWED_ORIGINS (dev servers) captured before
+// the env var is dropped; plugin UI may be framed by them too.
+var embeddedOrigins []string
+
+func embeddedExtraOrigins() []string {
+	var out []string
+	for _, o := range embeddedOrigins {
+		if o = strings.TrimRight(strings.TrimSpace(o), "/"); o != "" && !strings.ContainsAny(o, " ;,") {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// pluginOptions: dev install only on the desktop sidecar with
+// PATCHMAN_PLUGIN_DEV=1; the server never installs unsigned plugins and
+// gives private:true rules no private range (RFC §15).
+func pluginOptions(cfg *config.Config) pluginapi.Options {
+	o := pluginapi.Options{RestrictPrivate: !cfg.IsEmbedded()}
+	if !cfg.IsEmbedded() {
+		// Hosted: the private ranges plugins may reach (admin-set CIDRs,
+		// comma-separated). Empty = none.
+		for _, c := range strings.Split(os.Getenv("PLUGIN_PRIVATE_CIDRS"), ",") {
+			if c = strings.TrimSpace(c); c == "" {
+				continue
+			}
+			if p, err := netip.ParsePrefix(c); err == nil {
+				o.PrivateAllow = append(o.PrivateAllow, p.Masked())
+			} else {
+				log.Printf("PLUGIN_PRIVATE_CIDRS: ignoring %q: %v", c, err)
+			}
+		}
+	}
+	// Trusted publisher keys from the environment: "Name=base64key,Name2=…".
+	for _, entry := range strings.Split(os.Getenv("PATCHMAN_PLUGIN_TRUSTED_KEYS"), ",") {
+		name, key, ok := strings.Cut(strings.TrimSpace(entry), "=")
+		if !ok {
+			continue
+		}
+		if k, err := pkgsig.ParsePublicKey(key); err == nil {
+			o.EnvTrustedKeys = append(o.EnvTrustedKeys, pkgsig.TrustedKey{KeyID: pkgsig.KeyID(k), Name: strings.TrimSpace(name), Key: k})
+		} else {
+			log.Printf("PATCHMAN_PLUGIN_TRUSTED_KEYS: ignoring %q: %v", name, err)
+		}
+	}
+	if cfg.IsEmbedded() {
+		o.Manage = true
+		o.DevInstall = os.Getenv("PATCHMAN_PLUGIN_DEV") == "1"
+		if cfg.DBPath != "" {
+			o.CacheDir = filepath.Join(filepath.Dir(cfg.DBPath), "plugin-cache")
+		}
+	}
+	return o
+}
 
 // ensureLocalMCPToken provisions a STABLE pmcp_ token for the embedded local
 // user so the stdio bridge authenticates against /api/mcp without the user

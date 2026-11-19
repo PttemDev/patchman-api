@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"net/url"
 	"patchman-be/internal/mcpinstr"
@@ -30,7 +31,7 @@ type recallIn struct {
 	Budget  int    `json:"budget,omitempty" jsonschema:"max tokens in the answer, 100-2000 (default 800)"`
 	Scope   string `json:"scope,omitempty" jsonschema:"'all' (default), 'personal' or 'team' — which memories to search"`
 	Project string `json:"project,omitempty" jsonschema:"the project you work in; its cards rank first (default: your working directory's name)"`
-	From    string `json:"from,omitempty" jsonschema:"a person's name or email: answer only from their notes and memories — those they shared with you (or your own). Use it when the user asks what someone knows, e.g. 'check Ekrem's notes'"`
+	From    string `json:"from,omitempty" jsonschema:"a person's name or email: answer only from their notes and memories — those they shared with you (or your own). Use it when the user asks what someone knows, e.g. 'check Alex's notes'"`
 }
 
 type rememberIn struct {
@@ -39,12 +40,14 @@ type rememberIn struct {
 	Scope   string `json:"scope,omitempty" jsonschema:"'personal' (default) or 'team' (the team memory shared with you; your default one when there are several)"`
 	Folder  string `json:"folderId,omitempty" jsonschema:"a memory folder id from memory_folders — overrides scope"`
 	Project string `json:"project,omitempty" jsonschema:"the project this is about; cards are grouped by project (default: your working directory's name)"`
+	Key     string `json:"key,omitempty" jsonschema:"a stable id of where this memory comes from, e.g. the path of your own memory file: remembering the same key again replaces that card in place (title, summary and body) instead of adding a new one"`
+	Adopt   string `json:"adopt,omitempty" jsonschema:"with key: an existing card of yours (#id) that should take this key, when it was saved earlier under another title"`
 }
 
 type linkNotesIn struct {
 	Src  string `json:"src" jsonschema:"the note the link starts from: id or short id from recall (#abcd1234)"`
 	Dst  string `json:"dst" jsonschema:"the target: a note id / short id, or a patchman:// URI"`
-	Type string `json:"type" jsonschema:"one of: depends_on, part_of, contradicts, supersedes, example_of, related, refers_to"`
+	Type string `json:"type" jsonschema:"how src relates to dst: depends_on (src needs dst), part_of (src is a piece of dst), example_of (src illustrates dst), supersedes (src replaces dst; dst goes stale), contradicts, refers_to (src mentions an entity / patchman:// URI), related (only if nothing else fits)"`
 }
 
 type updateNoteIn struct {
@@ -102,9 +105,10 @@ func registerNotesTools(s *mcpsdk.Server, c *caller) {
 			if in.Mode == "append" {
 				code, out := c.cloudOrLocal("POST", path+"/append", map[string]string{"text": in.Body})
 				if code >= 400 || in.ParentID == nil {
-					return code, out
+					return code, noteAck(code, out)
 				}
-				return c.cloudOrLocal("PATCH", path, map[string]any{"parentId": *in.ParentID})
+				code, out = c.cloudOrLocal("PATCH", path, map[string]any{"parentId": *in.ParentID})
+				return code, noteAck(code, out)
 			}
 			patch := map[string]any{}
 			if in.Title != "" {
@@ -119,13 +123,14 @@ func registerNotesTools(s *mcpsdk.Server, c *caller) {
 			if in.ParentID != nil {
 				patch["parentId"] = *in.ParentID
 			}
-			return c.cloudOrLocal("PATCH", path, patch)
+			code, out := c.cloudOrLocal("PATCH", path, patch)
+			return code, noteAck(code, out)
 		})
 	reg(s, "delete_note", "Delete a note and everything under it (soft delete — recoverable by the owner)."+notesNote,
 		func(in idIn) (int, string) { return c.cloudOrLocal("DELETE", "/api/notes/"+url.PathEscape(in.ID), nil) })
 
 	// Agent memory.
-	reg(s, "recall", "Call before answering anything project-specific. Returns the notes and knowledge cards that match, with their links, within a token budget — one call is usually enough. Lines read '#id title | summary'; follow any 'hint:' line.",
+	reg(s, "recall", "Call before answering anything project-specific. Searches every memory you can read — your own Agent Memory plus team, shared and 'everyone' memories (memory_folders lists them) — and returns the notes and knowledge cards that match, with their links, within a token budget; one call is usually enough. Lines read '#id title | summary', hits from others' memories are tagged; follow any 'hint:' line.",
 		func(in recallIn) (int, string) {
 			v := url.Values{}
 			v.Set("q", in.Q)
@@ -149,23 +154,33 @@ func registerNotesTools(s *mcpsdk.Server, c *caller) {
 				Text string `json:"text"`
 			}
 			if json.Unmarshal([]byte(dataOf(out)), &res) == nil && res.Text != "" {
+				if foot := recallFooter(c.memoryFolders(context.Background()), in.Scope, in.From); foot != "" {
+					return code, res.Text + "\n" + foot
+				}
 				return code, res.Text
 			}
 			return code, out
 		})
 	reg(s, "remember", "Call when you learn something durable: a decision, root cause, convention or fact worth knowing next time. One concept per call, no secrets. It is filed as a knowledge card in your Agent Memory, under the project you work in, signed with your name as an agent; the answer names the card (#id) so you can link it.",
 		func(in rememberIn) (int, string) {
-			code, out := c.cloudOrLocal("POST", "/api/notes/remember", map[string]string{"text": in.Text, "context": in.Context, "scope": in.Scope, "folderId": in.Folder, "project": in.Project})
+			code, out := c.cloudOrLocal("POST", "/api/notes/remember", map[string]string{"text": in.Text, "context": in.Context, "scope": in.Scope, "folderId": in.Folder, "project": in.Project, "key": in.Key, "adopt": in.Adopt})
 			if code >= 400 {
 				return code, out
 			}
 			return code, rememberAnswer(out)
 		})
+	reg(s, "forget", "Delete the cards you saved with this remember key (soft delete — the owner can restore them). For a sync tool whose source file is gone; parts=true also removes the key's split parts (key#1, key#2, …).",
+		func(in struct {
+			Key   string `json:"key" jsonschema:"the remember key"`
+			Parts bool   `json:"parts,omitempty"`
+		}) (int, string) {
+			return c.cloudOrLocal("POST", "/api/notes/forget", map[string]any{"key": in.Key, "parts": in.Parts})
+		})
 	reg(s, "memory_folders", "List your memories: your personal Agent Memory folder and the team / shared ones you can read, each with its scope, whether you can write to it and its card count. Use an id as remember's folderId when there are several team memories.",
 		func(in struct{}) (int, string) {
 			return c.cloudOrLocal("GET", "/api/notes/memory", nil)
 		})
-	reg(s, "link_notes", "Connect two existing notes (or a note and a patchman:// entity) with a typed link. Prefer it over writing the same thing twice. Links from a note a person wrote are suggested to them instead.",
+	reg(s, "link_notes", "Connect two existing notes (or a note and a patchman:// entity) with a typed link — depends_on, part_of, example_of, supersedes, contradicts, refers_to or related. Use the most specific type; recall follows these links. Prefer it over writing the same thing twice. Links from a note a person wrote are suggested to them instead.",
 		func(in linkNotesIn) (int, string) {
 			return c.cloudOrLocal("POST", "/api/notes/"+url.PathEscape(strings.TrimPrefix(in.Src, "#"))+"/links", map[string]string{"dst": in.Dst, "type": in.Type})
 		})
@@ -176,6 +191,27 @@ func registerNotesTools(s *mcpsdk.Server, c *caller) {
 // memoryInstructions lives in mcpinstr so the stdio bridge can hand it out
 // while the desktop app is still starting.
 const memoryInstructions = mcpinstr.MemoryInstructions
+
+// noteAck shortens a successful update_note answer to what the agent needs
+// next (id, version for the next replace, title, summary): echoing the whole
+// body back cost as many tokens as the edit itself.
+func noteAck(code int, out string) string {
+	if code >= 400 {
+		return out
+	}
+	var n struct {
+		ID      string `json:"id"`
+		Title   string `json:"title"`
+		Summary string `json:"summary"`
+		Version int64  `json:"version"`
+		Updated string `json:"updatedAt"`
+	}
+	if json.Unmarshal([]byte(dataOf(out)), &n) != nil || n.ID == "" {
+		return out
+	}
+	b, _ := json.Marshal(map[string]any{"data": map[string]any{"id": n.ID, "title": n.Title, "summary": n.Summary, "version": n.Version, "updatedAt": n.Updated, "saved": true}})
+	return string(b)
+}
 
 // dataOf returns the raw JSON under a REST response's "data" key (or the body
 // itself when it isn't wrapped), for stitching two responses into one result.
@@ -203,6 +239,7 @@ type rememberCard struct {
 func rememberAnswer(out string) string {
 	var r struct {
 		Hint    string        `json:"hint"`
+		Hints   []string      `json:"hints"`
 		Status  string        `json:"status"`
 		Project string        `json:"project"`
 		Outcome string        `json:"outcome"`
@@ -216,6 +253,9 @@ func rememberAnswer(out string) string {
 	if r.Hint != "" {
 		text += "\nhint: " + r.Hint
 	}
+	for _, h := range r.Hints {
+		text += "\nhint: " + h
+	}
 	return text
 }
 
@@ -228,6 +268,12 @@ func rememberLine(project, outcome string, card *rememberCard) string {
 		return "Queued" + where + " — the AI provider is splitting it into cards; recall finds them in a few seconds."
 	}
 	switch outcome {
+	case "updated":
+		return "Updated " + card.Short + " \"" + card.Title + "\"" + where + " in place."
+	case "adopted":
+		return "Updated " + card.Short + " \"" + card.Title + "\"" + where + " in place (it now carries this key)."
+	case "unchanged":
+		return "Already up to date: " + card.Short + " \"" + card.Title + "\"" + where + "."
 	case "duplicate":
 		return "Already remembered as " + card.Short + " \"" + card.Title + "\"" + where + " — nothing new saved."
 	case "merge":

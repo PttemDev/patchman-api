@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"patchman-be/internal/models"
+	"patchman-be/internal/notecards"
 	"patchman-be/internal/notesearch"
 	"patchman-be/internal/realtime"
 
@@ -75,6 +76,10 @@ func noteSource(c *gin.Context) string {
 // baseVersion (optimistic concurrency). conflict=true means someone saved in
 // between; the caller answers 409 with the current note.
 func applyNoteContent(db *gorm.DB, c *gin.Context, n *models.Note, title, body *string, baseVersion int64, actor, source string) (conflict bool, err error) {
+	// A card whose summary was derived from its body (not written by hand)
+	// gets a fresh one when the body changes — else recall keeps showing the
+	// old first line.
+	refreshSummary := n.Type == "card" && body != nil && autoSummary(*n)
 	updates := map[string]any{
 		"version":    gorm.Expr("version + 1"),
 		"updated_by": actor,
@@ -85,6 +90,13 @@ func applyNoteContent(db *gorm.DB, c *gin.Context, n *models.Note, title, body *
 	}
 	if body != nil {
 		updates["body"] = *body
+	}
+	if refreshSummary {
+		t := n.Title
+		if title != nil {
+			t = *title
+		}
+		updates["summary"] = derivedSummary(t, *body)
 	}
 	res := db.Model(&models.Note{}).Where("id = ? AND version = ?", n.ID, baseVersion).Updates(updates)
 	if res.Error != nil {
@@ -122,6 +134,26 @@ func appendNoteBody(db *gorm.DB, c *gin.Context, n *models.Note, text, actor, so
 	}
 	afterNoteContentChange(db, c, n, actor, source)
 	return nil
+}
+
+// autoSummary: the card's summary is empty or is its body's first sentence
+// (what remember / DeriveCard would have written), so it may be regenerated.
+func autoSummary(n models.Note) bool {
+	s := strings.TrimSpace(n.Summary)
+	return s == "" || s == derivedSummary(n.Title, n.Body)
+}
+
+// derivedSummary is a card body's first sentence (dropped when it only
+// repeats the title).
+func derivedSummary(title, body string) string {
+	s := notecards.PlainWiki(notecards.FirstSentence(body))
+	if r := []rune(s); len(r) > 200 {
+		s = strings.TrimSpace(string(r[:199])) + "…"
+	}
+	if strings.EqualFold(strings.TrimSpace(s), strings.TrimSpace(title)) {
+		return ""
+	}
+	return s
 }
 
 func afterNoteContentChange(db *gorm.DB, c *gin.Context, n *models.Note, actor, source string) {

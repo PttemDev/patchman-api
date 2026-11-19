@@ -12,7 +12,7 @@ import (
 // surfaces "syntax not recognized" vs "this op writes data" separately.
 func ValidateReadOnly(kind, q string) error {
 	switch kind {
-	case "postgres", "mysql", "cockroachdb", "yugabytedb", "redshift", "mariadb", "tidb", "sqlserver":
+	case "postgres", "mysql", "cockroachdb", "yugabytedb", "redshift", "mariadb", "tidb", "sqlserver", "bigquery":
 		if IsReadOnlySQL(q) {
 			return nil
 		}
@@ -30,7 +30,7 @@ func ValidateReadOnly(kind, q string) error {
 // than to reject it outright.
 func IsReadOnly(kind, q string) bool {
 	switch kind {
-	case "postgres", "mysql", "cockroachdb", "yugabytedb", "redshift", "mariadb", "tidb", "sqlserver":
+	case "postgres", "mysql", "cockroachdb", "yugabytedb", "redshift", "mariadb", "tidb", "sqlserver", "bigquery":
 		return IsReadOnlySQL(q)
 	case "mongo":
 		return IsReadOnlyMongo(q)
@@ -55,7 +55,7 @@ func IsReadOnly(kind, q string) bool {
 // guard.
 func IsWriteStatement(kind, q string) bool {
 	switch kind {
-	case "postgres", "mysql", "cockroachdb", "yugabytedb", "redshift", "mariadb", "tidb", "sqlserver":
+	case "postgres", "mysql", "cockroachdb", "yugabytedb", "redshift", "mariadb", "tidb", "sqlserver", "bigquery":
 		// For SQL there is no separate structural-error branch — the
 		// conservative guard refuses anything it can't classify as
 		// SELECT-class, and multi-statement SQL is a supported feature — so
@@ -83,7 +83,19 @@ func isWriteMongo(q string) bool {
 		return false
 	}
 	_, isWrite := forbiddenMongoOps[op]
-	return isWrite
+	return isWrite || (op == "aggregate" && aggregateWrites(trimmed))
+}
+
+// mongoWriteStageRE finds a $out / $merge stage key ("$out": / '$merge' : /
+// $out:). Conservative: the same text inside a string value also matches,
+// which only ever errs toward "write".
+var mongoWriteStageRE = regexp.MustCompile(`["']?\$(out|merge)["']?\s*:`)
+
+// aggregateWrites reports whether an aggregate pipeline writes ($out
+// replaces a collection, $merge upserts into one) — a read-only grant must
+// never reach them.
+func aggregateWrites(q string) bool {
+	return mongoWriteStageRE.MatchString(q)
 }
 
 // IsReadOnlySQL returns true when `q` looks like a SELECT-class
@@ -358,6 +370,9 @@ func ValidateReadOnlyMongo(q string) error {
 
 	if canon, ok := forbiddenMongoOps[matchedOp]; ok {
 		return fmt.Errorf("operation '%s' is a write — blocked.\n\nThis tool is read-only; only queries that don't mutate data are allowed.", canon)
+	}
+	if matchedOp == "aggregate" && aggregateWrites(trimmed) {
+		return fmt.Errorf("an aggregate with a $out or $merge stage writes to a collection — blocked.\n\nThis tool is read-only; only queries that don't mutate data are allowed.")
 	}
 	return nil
 }

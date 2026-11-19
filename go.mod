@@ -2,6 +2,8 @@ module patchman-be
 
 go 1.26.0
 
+toolchain go1.26.11
+
 require (
 	github.com/andybalholm/brotli v1.2.7
 	github.com/aws/aws-sdk-go-v2 v1.42.1
@@ -11,6 +13,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.105.0
 	github.com/creack/pty v1.1.24
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
+	github.com/extism/go-sdk v1.7.1
 	github.com/gin-contrib/cors v1.7.3
 	github.com/gin-gonic/gin v1.10.0
 	github.com/glebarez/sqlite v1.11.0
@@ -25,12 +28,13 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/rabbitmq/amqp091-go v1.16.0
 	github.com/redis/go-redis/v9 v9.22.0
+	github.com/tetratelabs/wazero v1.9.0
 	github.com/tidwall/gjson v1.18.0
 	github.com/tidwall/sjson v1.2.5
 	github.com/twmb/franz-go v1.21.5
 	github.com/twmb/franz-go/pkg/kadm v1.18.0
-	go.mongodb.org/mongo-driver/v2 v2.4.2
-	golang.org/x/crypto v0.58.0
+	go.mongodb.org/mongo-driver/v2 v2.4.4
+	golang.org/x/crypto v0.59.0
 	golang.org/x/net v0.62.0
 	gorm.io/driver/postgres v1.5.11
 	gorm.io/gorm v1.25.12
@@ -41,13 +45,19 @@ require (
 )
 
 require (
+	cloud.google.com/go/compute/metadata v0.3.0 // indirect
+	github.com/dylibso/observe-sdk/go v0.0.0-20240819160327-2d926c5d788a // indirect
+	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
+	github.com/ianlancetaylor/demangle v0.0.0-20240805132620-81f5be970eca // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
+	github.com/tetratelabs/wabin v0.0.0-20230304001439-f6f874872834 // indirect
+	go.opentelemetry.io/proto/otlp v1.3.1 // indirect
 )
 
 require (
-	filippo.io/edwards25519 v1.1.0 // indirect
+	filippo.io/edwards25519 v1.1.1 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.30 // indirect
@@ -86,7 +96,7 @@ require (
 	github.com/goccy/go-json v0.10.4 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
-	github.com/google/jsonschema-go v0.4.3 // indirect
+	github.com/google/jsonschema-go v0.4.3
 	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -125,11 +135,11 @@ require (
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/arch v0.12.0 // indirect
-	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/term v0.47.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/oauth2 v0.35.0
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/term v0.48.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect

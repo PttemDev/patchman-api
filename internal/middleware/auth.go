@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"patchman-be/internal/sessions"
 	"strings"
 	"time"
 
@@ -93,9 +94,35 @@ func JWTAuth(secret string, ttl time.Duration) gin.HandlerFunc {
 		// expiry wall. Set before c.Next() so the header rides on the response
 		// regardless of the handler's status code. Best-effort — a mint
 		// failure just means no refresh this round, not a failed request.
-		maybeRefresh(c, claims, secret, userID, ttl)
+		// Revocable device session (DESKTOP_SECURITY_RFC L8). Tokens minted
+		// before sessions existed carry no sid and pass; they get one on
+		// their next sliding refresh.
+		sid, _ := claims["sid"].(string)
+		if sessions.Default != nil {
+			var iat time.Time
+			if t, err := claims.GetIssuedAt(); err == nil && t != nil {
+				iat = t.Time
+			}
+			if err := sessions.Default.CheckToken(userID, sid, iat); err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error(), "sessionEnded": true})
+				c.Abort()
+				return
+			}
+			if sid == "" {
+				// Upgrade a pre-session token on first use so this device
+				// shows up in the device list and can be revoked by itself.
+				if fresh, err := MintForRequest(c, secret, userID, "", ttl); err == nil {
+					c.Header(RefreshedTokenHeader, fresh)
+				}
+			}
+		}
+
+		if sid != "" || sessions.Default == nil {
+			maybeRefresh(c, claims, secret, userID, sid, ttl)
+		}
 
 		c.Set("userID", userID)
+		c.Set("sessionID", sid)
 		c.Next()
 	}
 }
@@ -103,7 +130,7 @@ func JWTAuth(secret string, ttl time.Duration) gin.HandlerFunc {
 // maybeRefresh sets the RefreshedTokenHeader when the token is past its
 // half-life. No-op when the TTL is unknown, the exp claim is missing, or the
 // token still has more than half its life left.
-func maybeRefresh(c *gin.Context, claims jwt.MapClaims, secret, userID string, ttl time.Duration) {
+func maybeRefresh(c *gin.Context, claims jwt.MapClaims, secret, userID, sid string, ttl time.Duration) {
 	if ttl <= 0 {
 		return
 	}
@@ -114,7 +141,7 @@ func maybeRefresh(c *gin.Context, claims jwt.MapClaims, secret, userID string, t
 	if time.Until(exp.Time) >= ttl/2 {
 		return
 	}
-	if fresh, err := authtoken.Mint(secret, userID, ttl); err == nil {
+	if fresh, err := MintForRequest(c, secret, userID, sid, ttl); err == nil {
 		c.Header(RefreshedTokenHeader, fresh)
 	}
 }
@@ -191,4 +218,22 @@ func RequireAdmin(db *gorm.DB) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// MintForRequest issues a session token for userID. With a session store it
+// reuses sid, or opens a new device session (login, legacy refresh) described
+// by the request's user agent / IP / client version; without one it mints a
+// plain token.
+func MintForRequest(c *gin.Context, secret, userID, sid string, ttl time.Duration) (string, error) {
+	if sessions.Default == nil {
+		return authtoken.Mint(secret, userID, ttl)
+	}
+	if sid == "" {
+		var err error
+		sid, err = sessions.Default.Create(userID, c.Request.UserAgent(), c.ClientIP(), c.GetHeader("X-Client-Version"))
+		if err != nil {
+			return "", err
+		}
+	}
+	return authtoken.MintSession(secret, userID, sid, ttl)
 }

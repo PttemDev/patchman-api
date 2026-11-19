@@ -45,6 +45,10 @@ type Note struct {
 	// Agent names the AI agent that wrote a card ("Claude Code", "Cursor" —
 	// what the MCP client calls itself); empty for a person's.
 	Agent string `gorm:"type:varchar(64)" json:"agent,omitempty"`
+	// SourceKey ties a card to where it came from outside PatchMan (e.g. an
+	// agent's memory file "acme-memory/project_x.md"): remember() with the
+	// same key updates this card in place instead of adding another.
+	SourceKey string `gorm:"type:varchar(255);index" json:"sourceKey,omitempty"`
 	// Memory marks a folder as an agent memory folder: remember() files cards
 	// in it and the UI lists it as cards. Its scope (personal / team / …)
 	// follows from how it is shared.
@@ -160,11 +164,17 @@ type NoteInbox struct {
 	Text     string `gorm:"type:text" json:"text"`
 	Context  string `gorm:"type:text" json:"context,omitempty"`
 	Agent    string `gorm:"type:varchar(64)" json:"agent,omitempty"`
+	// SourceKey: remember(key) — update the card with this key in place.
+	SourceKey string `gorm:"type:varchar(255)" json:"sourceKey,omitempty"`
+	// Adopt: remember(adopt) — an unkeyed agent card to take the key.
+	Adopt    string `gorm:"type:varchar(36)" json:"adopt,omitempty"`
 	Status   string `gorm:"type:varchar(16);default:'pending';index" json:"status"` // pending | processing | done | failed
 	Attempts int    `gorm:"default:0" json:"attempts"`
 	NoteID   string `gorm:"type:varchar(36)" json:"noteId,omitempty"` // the card it became (or the one it matched)
 	// Outcome: created | duplicate (same text already there) | merge (same
-	// title: a merge was suggested) | split (the model made several cards).
+	// title: a merge was suggested) | split (the model made several cards) |
+	// updated / unchanged (a keyed card was replaced / already matched) |
+	// adopted (an unkeyed card with the same title took the key).
 	Outcome   string    `gorm:"type:varchar(16)" json:"outcome,omitempty"`
 	Error     string    `gorm:"type:text" json:"error,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`

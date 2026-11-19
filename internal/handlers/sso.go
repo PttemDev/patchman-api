@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"patchman-be/internal/authtoken"
 	"patchman-be/internal/config"
+	"patchman-be/internal/middleware"
 	"patchman-be/internal/models"
 
 	"github.com/gin-gonic/gin"
@@ -37,6 +37,9 @@ type SSOHandler struct {
 	cfg       *config.Config
 	jwtSecret string
 	http      *http.Client
+	// Test seams: build providers that talk to fake servers.
+	newGitHub func(*config.Config) ssoProvider
+	newGoogle func(*config.Config) ssoProvider
 }
 
 // ssoPendingState is the in-process view of an OAuth round-trip. The
@@ -86,6 +89,22 @@ func (h *SSOHandler) resolveProvider(name string) (ssoProvider, error) {
 			return nil, errors.New("GitLab SSO is not configured on the server")
 		}
 		return &gitlabSSO{cfg: h.cfg}, nil
+	case "github":
+		if !h.cfg.GitHubSSOEnabled() {
+			return nil, errors.New("GitHub sign-in is not configured on the server")
+		}
+		if h.newGitHub != nil {
+			return h.newGitHub(h.cfg), nil
+		}
+		return newGitHubSSO(h.cfg), nil
+	case "google":
+		if !h.cfg.GoogleSSOEnabled() {
+			return nil, errors.New("Google sign-in is not configured on the server")
+		}
+		if h.newGoogle != nil {
+			return h.newGoogle(h.cfg), nil
+		}
+		return newGoogleSSO(h.cfg), nil
 	default:
 		return nil, fmt.Errorf("unsupported sso provider %q", name)
 	}
@@ -208,7 +227,7 @@ func (h *SSOHandler) Start(c *gin.Context) {
 	if origin == "" {
 		origin = c.GetHeader("Origin")
 	}
-	redirect, err := h.redirectURIFor(in.Surface, origin)
+	redirect, err := h.redirectURIFor(in.Provider, in.Surface, origin)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -285,6 +304,11 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 		return
 	}
 	info, err := provider.fetchUser(h, tok.AccessToken)
+	var deny *ssoDeniedError
+	if errors.As(err, &deny) {
+		c.JSON(http.StatusForbidden, gin.H{"error": deny.Error()})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("fetch profile: %v", err)})
 		return
@@ -343,7 +367,7 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 		merged = true
 	}
 
-	jwtToken, err := h.generateToken(user.ID)
+	jwtToken, err := h.generateToken(c, user.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token issue failed"})
 		return
@@ -367,21 +391,27 @@ func (h *SSOHandler) Callback(c *gin.Context) {
 // Helpers
 // ----------------------------------------------------------------------
 
-// redirectURIFor returns the registered callback for the requested
-// surface. Reuses the GitLab integration's `/auth/gitlab/callback`
-// path so we don't have to register a separate set of URIs on the
-// GitLab OAuth Application. The FE callback page disambiguates SSO vs.
-// integration by checking sessionStorage for the SSO state token —
-// only the SSO flow stashes one, so its presence is the signal.
-func (h *SSOHandler) redirectURIFor(surface, origin string) (string, error) {
+// redirectURIFor returns the registered callback for the provider and
+// surface. GitLab keeps reusing the GitLab integration's
+// `/auth/gitlab/callback` (no new URIs on that OAuth app; the FE callback
+// page tells SSO from integration by the sessionStorage state). GitHub and
+// Google get their own `/auth/<provider>/callback` — register those on
+// their OAuth apps: <origin>/auth/<provider>/callback for the web and
+// patchman://auth/<provider>/callback for the desktop app.
+func (h *SSOHandler) redirectURIFor(provider, surface, origin string) (string, error) {
+	path := "auth/gitlab/callback"
+	switch provider {
+	case "github", "google":
+		path = "auth/" + provider + "/callback"
+	}
 	switch surface {
 	case "desktop":
-		return "patchman://auth/gitlab/callback", nil
+		return "patchman://" + path, nil
 	case "web", "":
 		if !originAllowed(h.cfg, origin) {
 			return "", fmt.Errorf("origin %q is not an allowed sign-in callback host", origin)
 		}
-		return origin + "/auth/gitlab/callback", nil
+		return origin + "/" + path, nil
 	default:
 		return "", fmt.Errorf("unknown surface %q", surface)
 	}
@@ -422,8 +452,8 @@ func (h *SSOHandler) takePending(state string) *ssoPendingState {
 	}
 }
 
-func (h *SSOHandler) generateToken(userID string) (string, error) {
-	return authtoken.Mint(h.jwtSecret, userID, h.cfg.SessionTTL)
+func (h *SSOHandler) generateToken(c *gin.Context, userID string) (string, error) {
+	return middleware.MintForRequest(c, h.jwtSecret, userID, "", h.cfg.SessionTTL)
 }
 
 func ssoRandomToken(n int) (string, error) {

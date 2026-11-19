@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"patchman-be/internal/middleware"
+	"patchman-be/internal/sessions"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -29,6 +30,7 @@ import (
 //   - ?token=<jwt>  → a signed-in user; role via ResolveWhiteboardRole
 //   - ?link=<token> → an anonymous link holder; role from the link row
 //   - embedded mode with neither → the local desktop user (owns everything)
+//
 // A viewer connects but the server drops their outbound frames (read-only).
 //
 // NB: rooms are in-process, so collaboration does NOT span BE replicas. v1 is
@@ -162,6 +164,17 @@ func (h *WhiteboardCollabHandler) resolveRole(c *gin.Context, id string) (Role, 
 	userID, _ := claims["user_id"].(string)
 	if userID == "" {
 		return NoRole, "", ""
+	}
+	// Same session rules as JWTAuth: a revoked device can't join rooms.
+	if sessions.Default != nil {
+		sid, _ := claims["sid"].(string)
+		var iat time.Time
+		if t, err := claims.GetIssuedAt(); err == nil && t != nil {
+			iat = t.Time
+		}
+		if sessions.Default.CheckToken(userID, sid, iat) != nil {
+			return NoRole, "", ""
+		}
 	}
 	name := userID
 	var u struct{ Name, Email string }

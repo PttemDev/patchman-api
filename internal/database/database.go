@@ -76,6 +76,8 @@ func Init(driver, dsn, defaultAdminEmail string) (*gorm.DB, error) {
 	// Auto-migrate all models
 	err = db.AutoMigrate(
 		&models.User{},
+		&models.UserSession{},
+		&models.SessionCutoff{},
 		&models.Collection{},
 		&models.SavedRequest{},
 		&models.Environment{},
@@ -134,6 +136,15 @@ func Init(driver, dsn, defaultAdminEmail string) (*gorm.DB, error) {
 		&models.RedisConnection{},
 		&models.RedisConnectionGrant{},
 		&models.RedisActivityHistory{},
+		// Plugins (PLUGIN_MARKETPLACE_RFC §15): installs, wasm blobs,
+		// connections on the shared backbone, grants, audit.
+		&models.Plugin{},
+		&models.PluginBlob{},
+		&models.PluginUIFile{},
+		&models.PluginTrustedKey{},
+		&models.PluginConnection{},
+		&models.PluginConnectionGrant{},
+		&models.PluginActivity{},
 		// Elasticsearch tool. Encrypted endpoint credentials + delegated
 		// grants + activity audit; thin authenticated HTTP forwarder.
 		&models.ESConnection{},
@@ -149,6 +160,7 @@ func Init(driver, dsn, defaultAdminEmail string) (*gorm.DB, error) {
 		&models.RabbitConnectionGrant{},
 		&models.RabbitActivityHistory{},
 		&models.GraylogConnection{},
+		&models.GCPCredential{},
 		&models.GraylogConnectionGrant{},
 		&models.GraylogActivityHistory{},
 		&models.SavedResponse{},
@@ -162,6 +174,7 @@ func Init(driver, dsn, defaultAdminEmail string) (*gorm.DB, error) {
 		&models.GitConnection{},
 		&models.GitConnectionGrant{},
 		&models.GitRepo{},
+		&models.UserSetting{},
 		&models.GitActivityHistory{},
 		// LLM providers — encrypted API key for OpenAI-compatible /
 		// Anthropic endpoints; requests are proxied + streamed server-side

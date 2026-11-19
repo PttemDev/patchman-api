@@ -151,8 +151,19 @@ func (h *DBConnectionHandler) Create(c *gin.Context) {
 		return
 	}
 	if !validKind(input.Kind) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be one of: postgres, mysql, mongo, cockroachdb, yugabytedb, redshift, mariadb, tidb, sqlserver"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be one of: postgres, mysql, mongo, cockroachdb, yugabytedb, redshift, mariadb, tidb, sqlserver, bigquery"})
 		return
+	}
+	if input.Kind == "bigquery" {
+		if err := normalizeBigQueryInput(&input, input.Password != "" || input.CopySecretsFrom != ""); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		// The creator owns the row, so the credential must be theirs.
+		if err := h.checkBigQueryCredential(userID, input.Options, &input.Username); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	sec, ok := h.secretsFor(c, userID, input)
 	if !ok {
@@ -307,6 +318,26 @@ func (h *DBConnectionHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if conn.Kind == "bigquery" && input.Password != nil && strings.TrimSpace(*input.Password) != "" {
+		probe := createConnectionInput{Kind: "bigquery", Database: conn.Database, Password: *input.Password, Options: map[string]any{"auth": "service_account"}}
+		if err := normalizeBigQueryInput(&probe, true); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		input.Username = &probe.Username
+	}
+	// Switching to / editing a shared Google credential: it must be the
+	// OWNER's (a co-owner may be the one editing), like GKE clusters.
+	if conn.Kind == "bigquery" && input.Options != nil {
+		if a, _ := input.Options["auth"].(string); a == "credential" {
+			label := ""
+			if err := h.checkBigQueryCredential(conn.UserID, input.Options, &label); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			input.Username = &label
+		}
+	}
 	updates := map[string]any{}
 	if input.Name != nil {
 		updates["name"] = *input.Name
@@ -420,8 +451,18 @@ func (h *DBConnectionHandler) Test(c *gin.Context) {
 			return
 		}
 		if !validKind(input.Kind) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be one of: postgres, mysql, mongo, cockroachdb, yugabytedb, redshift, mariadb, tidb, sqlserver"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be one of: postgres, mysql, mongo, cockroachdb, yugabytedb, redshift, mariadb, tidb, sqlserver, bigquery"})
 			return
+		}
+		if input.Kind == "bigquery" {
+			if err := normalizeBigQueryInput(&input, input.Password != "" || input.CopySecretsFrom != ""); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			if err := h.checkBigQueryCredential(userID, input.Options, &input.Username); err != nil {
+				c.JSON(http.StatusOK, gin.H{"data": gin.H{"ok": false, "error": err.Error()}})
+				return
+			}
 		}
 		// A duplicate being tested before save dials with its source's
 		// stored secrets (same manage gate as Create).
@@ -438,8 +479,11 @@ func (h *DBConnectionHandler) Test(c *gin.Context) {
 			}
 		}
 		optBytes, _ := json.Marshal(or(input.Options, map[string]any{}))
+		// UserID: the caller would own the row once saved — a BigQuery
+		// "credential" probe signs in with their shared Google credential.
 		conn = &models.DBConnection{
-			Kind: input.Kind, Host: input.Host, Port: input.Port,
+			UserID: userID,
+			Kind:   input.Kind, Host: input.Host, Port: input.Port,
 			Database: input.Database, Username: input.Username,
 			PasswordEnc: sec.passwordEnc, ConnectionStringEnc: sec.dsnEnc,
 			OptionsJSON: string(optBytes),
@@ -637,7 +681,7 @@ func validKind(k string) bool {
 	switch k {
 	case "postgres", "mysql", "mongo",
 		"cockroachdb", "yugabytedb", "redshift",
-		"mariadb", "tidb", "sqlserver":
+		"mariadb", "tidb", "sqlserver", "bigquery":
 		return true
 	}
 	return false

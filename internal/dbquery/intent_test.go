@@ -177,6 +177,17 @@ func TestIsReadOnlySQL_QuotedKeywords(t *testing.T) {
 // unconditional rejection instead of the AllowWrite bypass. "What
 // ValidateReadOnly rejects as a write" and "what IsWriteStatement treats as
 // a write" share mongoFirstOp, so they can never diverge.
+func TestReadOnlyRejectsWritingAggregate(t *testing.T) {
+	for _, q := range []string{`db.x.aggregate([{$out:"y"}])`, `db.x.aggregate([{'$merge':{into:'y'}}])`} {
+		if ValidateReadOnlyMongo(q) == nil {
+			t.Errorf("read-only must reject %s", q)
+		}
+	}
+	if err := ValidateReadOnlyMongo(`db.x.aggregate([{$match:{out:1}}])`); err != nil {
+		t.Errorf("plain aggregate must pass: %v", err)
+	}
+}
+
 func TestIsWriteStatement(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -189,6 +200,11 @@ func TestIsWriteStatement(t *testing.T) {
 		{"sql update is a write", "mysql", `UPDATE t SET x = 1`, true},
 		{"mongo find is not a write", "mongo", `db.x.find({})`, false},
 		{"mongo deleteMany is a write", "mongo", `db.x.deleteMany({})`, true},
+		// $out replaces a collection, $merge upserts into one: an aggregate
+		// carrying either is a write (regression: it used to pass as a read).
+		{"mongo aggregate is not a write", "mongo", `db.x.aggregate([{$match:{a:1}},{$group:{_id:"$a"}}])`, false},
+		{"mongo aggregate $out is a write", "mongo", `db.x.aggregate([{$match:{}},{$out:"y"}])`, true},
+		{"mongo aggregate quoted $merge is a write", "mongo", `db.getSiblingDB('d').x.aggregate([{"$merge" : {into:"y"}}])`, true},
 		// Structural: multi-statement `;` is NOT a write — it must stay
 		// ValidateReadOnly's rejection so AllowWrite can never bypass it,
 		// even though the second statement is a drop().

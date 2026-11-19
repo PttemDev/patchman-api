@@ -168,6 +168,9 @@ func copyLogLines(ctx context.Context, src io.ReadCloser, w io.Writer, flush fun
 	for {
 		select {
 		case <-ctx.Done():
+			// Close here too: the watcher goroutine above may see `done`
+			// first and skip its Close, leaving the upstream open.
+			_ = src.Close()
 			return nil
 		case l, ok := <-lines:
 			if !ok {

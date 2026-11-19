@@ -1,9 +1,12 @@
 package mcp
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"patchman-be/internal/cloudsession"
@@ -108,5 +111,115 @@ func TestGitToolsFollowCloudSession(t *testing.T) {
 	cloudPaths = nil
 	if e := decode(t, call(t, cs, "list_db_connections", map[string]any{})); e.Path != "/api/db-connections" || len(cloudPaths) != 0 {
 		t.Errorf("list_db_connections must stay local; echo=%+v cloud=%v", e, cloudPaths)
+	}
+}
+
+// TestGitToolsRoutePerConnection: signed in, each git call runs where its
+// connection works — a token (PAT) connection or one kept only on this
+// computer runs here; an OAuth connection the server also has goes there.
+// list_git_connections merges both sides with runsOn.
+func TestGitToolsRoutePerConnection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	eng := gin.New()
+	localConns := map[string]string{"g-pat": "pat", "g-local-oauth": "oauth", "g-both": "oauth"}
+	eng.GET("/api/git/connections", func(c *gin.Context) {
+		out := []gin.H{}
+		for _, id := range []string{"g-pat", "g-local-oauth", "g-both"} {
+			out = append(out, gin.H{"id": id, "authKind": localConns[id]})
+		}
+		c.JSON(200, gin.H{"data": out})
+	})
+	eng.GET("/api/git/connections/:id", func(c *gin.Context) {
+		if k, ok := localConns[c.Param("id")]; ok {
+			c.JSON(200, gin.H{"data": gin.H{"id": c.Param("id"), "authKind": k}})
+			return
+		}
+		c.JSON(404, gin.H{"error": "Connection not found"})
+	})
+	eng.GET("/api/git/connections/:id/repos", func(c *gin.Context) { c.JSON(200, gin.H{"data": "local:" + c.Param("id")}) })
+
+	var cloudCalls []string
+	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cloudCalls = append(cloudCalls, r.URL.Path)
+		switch r.URL.Path {
+		case "/api/git/connections":
+			_, _ = w.Write([]byte(`{"data":[{"id":"g-both","authKind":"oauth"},{"id":"g-cloud","authKind":"oauth"}]}`))
+		case "/api/git/connections/g-both", "/api/git/connections/g-cloud":
+			_, _ = w.Write([]byte(`{"data":{"id":"x"}}`))
+		case "/api/git/connections/g-both/repos", "/api/git/connections/g-cloud/repos":
+			_, _ = w.Write([]byte(`{"data":"cloud"}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"error":"Connection not found"}`))
+		}
+	}))
+	defer cloud.Close()
+	cloudsession.Set(cloud.URL, "tok")
+	t.Cleanup(cloudsession.Clear)
+	cloudConnCache = sync.Map{}
+	c := &caller{engine: eng, jwtSecret: "s", userID: "u"}
+	ctx := context.Background()
+
+	for id, want := range map[string]string{
+		"g-pat":         "local:g-pat",         // own token → here
+		"g-local-oauth": "local:g-local-oauth", // the server doesn't have it → here
+		"g-both":        "cloud",               // OAuth on both → server (linked account)
+		"g-cloud":       "cloud",               // only on the server
+	} {
+		code, body := c.gitCallCtx(ctx, id, "GET", gitPath(id, "/repos", nil), nil)
+		if code != 200 || !strings.Contains(body, `"`+want+`"`) {
+			t.Errorf("%s: got %d %s, want %s", id, code, body, want)
+		}
+	}
+
+	code, body := c.listGitConnections(ctx)
+	var out struct {
+		Data []map[string]any `json:"data"`
+	}
+	_ = json.Unmarshal([]byte(body), &out)
+	got := map[string]any{}
+	for _, m := range out.Data {
+		got[m["id"].(string)] = m["runsOn"]
+	}
+	want := map[string]any{"g-pat": "local", "g-local-oauth": "local", "g-both": "cloud", "g-cloud": "cloud"}
+	if code != 200 || len(got) != 4 {
+		t.Fatalf("list: %d %s", code, body)
+	}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("list %s runsOn=%v want %v", id, got[id], w)
+		}
+	}
+
+	// The server's answer is cached: a second call costs no lookup.
+	cloudCalls = nil
+	c.gitCallCtx(ctx, "g-both", "GET", gitPath("g-both", "/repos", nil), nil)
+	if len(cloudCalls) != 1 {
+		t.Errorf("cached route: want only the repos call, got %v", cloudCalls)
+	}
+
+	// Not signed in: everything in-process, list untouched.
+	cloudsession.Clear()
+	if _, body := c.gitCallCtx(ctx, "g-both", "GET", gitPath("g-both", "/repos", nil), nil); !strings.Contains(body, "local:g-both") {
+		t.Errorf("no session must run locally: %s", body)
+	}
+}
+
+// On the hosted server an unknown git connection id gets a hint pointing to
+// the desktop app's MCP; the desktop's own MCP keeps the plain error.
+func TestGitUnknownConnectionHint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	eng := gin.New()
+	eng.GET("/api/git/connections/:id/repos", func(c *gin.Context) { c.JSON(404, gin.H{"error": "Connection not found"}) })
+	c := &caller{engine: eng, jwtSecret: "s", userID: "u"}
+	cloudsession.Clear()
+	SetEmbedded(false)
+	t.Cleanup(func() { SetEmbedded(false) })
+	if _, body := c.gitCallCtx(context.Background(), "x", "GET", gitPath("x", "/repos", nil), nil); !strings.Contains(body, "patchman-local") {
+		t.Errorf("hosted: want desktop hint, got %s", body)
+	}
+	SetEmbedded(true)
+	if _, body := c.gitCallCtx(context.Background(), "x", "GET", gitPath("x", "/repos", nil), nil); strings.Contains(body, "patchman-local") {
+		t.Errorf("desktop: no hint expected, got %s", body)
 	}
 }

@@ -32,6 +32,11 @@ type Config struct {
 	// (a Go duration like "720h"); default 30 days.
 	SessionTTL time.Duration
 
+	// SessionIdleTTL ends a session that hasn't been used for this long, even
+	// though its token would still slide forward (DESKTOP_SECURITY_RFC L8).
+	// Env: SESSION_IDLE_TTL (Go duration, e.g. "72h"); 0 = off (default).
+	SessionIdleTTL time.Duration
+
 	// AppName is a friendly name for this backend, surfaced by the public
 	// GET /api/config discovery endpoint so a desktop client connecting via
 	// `patchman://connect?backend=…` can label the remote without the user
@@ -65,6 +70,22 @@ type Config struct {
 	GitLabBaseURL      string
 	GitLabClientID     string
 	GitLabClientSecret string
+
+	// GitHub sign-in (OAuth app). GitHubBaseURL is github.com or a GitHub
+	// Enterprise Server root (its API is <base>/api/v3).
+	GitHubBaseURL      string
+	GitHubClientID     string
+	GitHubClientSecret string
+	// Google sign-in (OAuth client). GoogleWorkspaceDomains, when set, limits
+	// it to accounts of those Google Workspace domains (checked server-side
+	// against the hd claim, not just hinted).
+	GoogleClientID         string
+	GoogleClientSecret     string
+	// The second ("External") OAuth client for "Connect Google Cloud" from
+	// addresses outside GoogleWorkspaceDomains (GOOGLE_CLOUD_RFC.md ADR-4).
+	GoogleExternalClientID     string
+	GoogleExternalClientSecret string
+	GoogleWorkspaceDomains []string
 	// Base64-encoded 32-byte key. AES-GCM encrypts access/refresh tokens
 	// at rest in user_git_integrations.
 	GitLabTokenEncKey string
@@ -142,18 +163,19 @@ func Load() *Config {
 	_ = fs.Parse(os.Args[1:])
 
 	cfg := &Config{
-		Mode:      normalizeMode(*mode),
-		Port:      getEnv("PORT", "8085"),
-		BindAddr:  *bind,
-		JWTSecret:  getEnv("JWT_SECRET", "patchman-jwt-secret-change-in-production"),
-		SessionTTL: getDurationEnv("SESSION_TTL", 30*24*time.Hour),
-		AppName:    getEnv("APP_NAME", "PatchMan"),
-		DBHost:    getEnv("DB_HOST", "localhost"),
-		DBPort:    getEnv("DB_PORT", "5432"),
-		DBName:    getEnv("DB_NAME", "getman"),
-		DBUser:    getEnv("DB_USER", "umds"),
-		DBPass:    getEnv("DB_PASSWORD", "secret"),
-		DBSSLMode: getEnv("DB_SSLMODE", "disable"),
+		Mode:           normalizeMode(*mode),
+		Port:           getEnv("PORT", "8085"),
+		BindAddr:       *bind,
+		JWTSecret:      getEnv("JWT_SECRET", "patchman-jwt-secret-change-in-production"),
+		SessionTTL:     getDurationEnv("SESSION_TTL", 30*24*time.Hour),
+		SessionIdleTTL: getDurationEnv("SESSION_IDLE_TTL", 0),
+		AppName:        getEnv("APP_NAME", "PatchMan"),
+		DBHost:         getEnv("DB_HOST", "localhost"),
+		DBPort:         getEnv("DB_PORT", "5432"),
+		DBName:         getEnv("DB_NAME", "getman"),
+		DBUser:         getEnv("DB_USER", "umds"),
+		DBPass:         getEnv("DB_PASSWORD", "secret"),
+		DBSSLMode:      getEnv("DB_SSLMODE", "disable"),
 	}
 
 	cfg.DBDriver = resolveDriver(*driver, cfg.Mode)
@@ -165,6 +187,15 @@ func Load() *Config {
 	cfg.GitLabClientID = getEnv("GITLAB_OAUTH_CLIENT_ID", "")
 	cfg.GitLabClientSecret = getEnv("GITLAB_OAUTH_CLIENT_SECRET", "")
 	cfg.GitLabTokenEncKey = getEnv("GITLAB_TOKEN_ENC_KEY", "")
+
+	cfg.GitHubBaseURL = strings.TrimRight(getEnv("GITHUB_BASE_URL", "https://github.com"), "/")
+	cfg.GitHubClientID = getEnv("GITHUB_OAUTH_CLIENT_ID", "")
+	cfg.GitHubClientSecret = getEnv("GITHUB_OAUTH_CLIENT_SECRET", "")
+	cfg.GoogleClientID = getEnv("GOOGLE_OAUTH_CLIENT_ID", "")
+	cfg.GoogleClientSecret = getEnv("GOOGLE_OAUTH_CLIENT_SECRET", "")
+	cfg.GoogleExternalClientID = getEnv("GOOGLE_OAUTH_EXTERNAL_CLIENT_ID", "")
+	cfg.GoogleExternalClientSecret = getEnv("GOOGLE_OAUTH_EXTERNAL_CLIENT_SECRET", "")
+	cfg.GoogleWorkspaceDomains = parseEmailDomains(getEnv("GOOGLE_WORKSPACE_DOMAINS", ""))
 
 	cfg.SlackErrorWebhookURL = getEnv("SLACK_ERROR_WEBHOOK_URL", "")
 
@@ -255,6 +286,16 @@ func parseCSV(raw string) []string {
 // returns false instead of trying to call GitLab without credentials.
 func (c *Config) GitLabEnabled() bool {
 	return c.GitLabClientID != "" && c.GitLabClientSecret != "" && c.GitLabTokenEncKey != ""
+}
+
+// GitHubSSOEnabled reports whether GitHub sign-in is configured.
+func (c *Config) GitHubSSOEnabled() bool {
+	return c.GitHubClientID != "" && c.GitHubClientSecret != ""
+}
+
+// GoogleSSOEnabled reports whether Google sign-in is configured.
+func (c *Config) GoogleSSOEnabled() bool {
+	return c.GoogleClientID != "" && c.GoogleClientSecret != ""
 }
 
 // ForwardEnabled reports whether upstream mirroring should run. Both target

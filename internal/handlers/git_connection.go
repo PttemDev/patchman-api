@@ -105,6 +105,18 @@ func (h *GitConnectionHandler) Create(c *gin.Context) {
 		return
 	}
 	authKind := normalizeGitAuthKind(input.AuthKind)
+	if p := normalizeGitProvider(input.Provider); p != "gitlab" && p != "github" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider must be gitlab or github"})
+		return
+	} else if p == "github" {
+		// GitHub connections use a personal access token for now.
+		if authKind == "oauth" {
+			authKind = "pat"
+		}
+		if strings.TrimSpace(input.BaseURL) == "" {
+			input.BaseURL = "https://github.com"
+		}
+	}
 	enc := ""
 	if authKind != "oauth" {
 		if strings.TrimSpace(input.Credential) == "" {
@@ -282,6 +294,7 @@ func (h *GitConnectionHandler) Test(c *gin.Context) {
 		baseURL  string
 		credent  string
 		connID   string
+		provider string
 	)
 	if id != "" && id != "new" {
 		var existing models.GitConnection
@@ -292,6 +305,7 @@ func (h *GitConnectionHandler) Test(c *gin.Context) {
 		authKind = existing.AuthKind
 		baseURL = existing.BaseURL
 		connID = existing.ID
+		provider = existing.Provider
 		if existing.CredentialEnc != "" {
 			if p, err := h.cipher.Decrypt(existing.CredentialEnc); err == nil {
 				credent = p
@@ -325,6 +339,23 @@ func (h *GitConnectionHandler) Test(c *gin.Context) {
 		authKind = normalizeGitAuthKind(input.AuthKind)
 		baseURL = strings.TrimSpace(input.BaseURL)
 		credent = input.Credential
+		provider = input.Provider
+	}
+	if normalizeGitProvider(provider) == "github" {
+		if strings.TrimSpace(credent) == "" {
+			c.JSON(http.StatusOK, gin.H{"data": gin.H{"ok": false, "reachable": false, "error": "a personal access token is required for GitHub"}})
+			return
+		}
+		login, err := probeGitHubPAT(h.http, baseURL, credent)
+		if connID != "" {
+			h.audit(userID, connID, "test", err == nil, gin.H{"provider": "github"})
+		}
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"data": gin.H{"ok": false, "reachable": false, "error": err.Error()}})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{"ok": true, "reachable": true, "version": "GitHub · " + login}})
+		return
 	}
 
 	switch authKind {

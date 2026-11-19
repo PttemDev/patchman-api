@@ -23,6 +23,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -73,6 +74,11 @@ type bridge struct {
 	// Offline handling: alive probes a discovery URL; while the app is down a
 	// single watcher polls every watchEvery and announces list_changed once it
 	// answers.
+	// inflight cancels the HTTP call of a running request when the client
+	// sends notifications/cancelled (the stateless server can't route it).
+	inflightMu sync.Mutex
+	inflight   map[string]context.CancelFunc
+
 	alive      func(mcpURL string) bool
 	watchEvery time.Duration
 	watchMu    sync.Mutex
@@ -155,7 +161,29 @@ func (b *bridge) handle(msg []byte) {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodPost, info.URL, bytes.NewReader(msg))
+	if env.Method == "notifications/cancelled" {
+		b.cancelInflight(msg)
+		// Also forward it: harmless, and right for a stateful server.
+	}
+	ctx := context.Background()
+	if isReq {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		key := string(env.ID)
+		b.inflightMu.Lock()
+		if b.inflight == nil {
+			b.inflight = map[string]context.CancelFunc{}
+		}
+		b.inflight[key] = cancel
+		b.inflightMu.Unlock()
+		defer func() {
+			b.inflightMu.Lock()
+			delete(b.inflight, key)
+			b.inflightMu.Unlock()
+			cancel()
+		}()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, info.URL, bytes.NewReader(msg))
 	if err != nil {
 		if isReq {
 			b.writeErr(env.ID, -32000, "PatchMan discovery URL is invalid: "+err.Error())
@@ -167,6 +195,9 @@ func (b *bridge) handle(msg []byte) {
 	// lacks BOTH application/json and text/event-stream, even in JSONResponse
 	// mode. Missing this 400s every call.
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	// Ask for an SSE answer: progress notifications then arrive while a
+	// long tool call runs (the server answers JSON to clients that don't ask).
+	req.Header.Set("X-PatchMan-Stream", "1")
 	req.Header.Set("Authorization", "Bearer "+info.Token)
 	name, title := b.getClient()
 	if name != "" || title != "" {
@@ -184,10 +215,17 @@ func (b *bridge) handle(msg []byte) {
 
 	resp, err := b.httpc.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return // cancelled by the client: it expects no answer
+		}
 		b.offline(env, isReq, msg, "PatchMan is not reachable: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 400 && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		b.relaySSE(resp.Body)
+		return
+	}
 	body, _ := io.ReadAll(resp.Body)
 
 	// Notification-only POST => 202/204 with no body: relay nothing.
@@ -222,6 +260,12 @@ func (b *bridge) offline(env envelope, isReq bool, msg []byte, errMsg string) {
 		b.writeResult(env.ID, map[string]any{})
 	case "tools/list":
 		b.writeResult(env.ID, map[string]any{"tools": []any{}})
+	case "prompts/list":
+		b.writeResult(env.ID, map[string]any{"prompts": []any{}})
+	case "resources/list":
+		b.writeResult(env.ID, map[string]any{"resources": []any{}})
+	case "resources/templates/list":
+		b.writeResult(env.ID, map[string]any{"resourceTemplates": []any{}})
 	default:
 		b.writeErr(env.ID, -32000, errMsg)
 	}
@@ -250,8 +294,9 @@ func (b *bridge) offlineInit(msg []byte) map[string]any {
 	b.protoMu.Unlock()
 	return map[string]any{
 		"protocolVersion": version,
-		"capabilities":    map[string]any{"tools": map[string]any{"listChanged": true}},
-		"serverInfo":      map[string]any{"name": "patchman", "title": "Patchman", "version": buildVersion},
+		"capabilities": map[string]any{"tools": map[string]any{"listChanged": true}, "prompts": map[string]any{"listChanged": true},
+			"resources": map[string]any{"listChanged": true}},
+		"serverInfo": map[string]any{"name": "patchman", "title": "Patchman", "version": buildVersion},
 		"instructions": "The PatchMan desktop app is not running yet: its tools appear by themselves once it starts.\n\n" +
 			mcpinstr.MemoryInstructions,
 	}
@@ -278,6 +323,8 @@ func (b *bridge) watch() {
 			b.watching = false
 			b.watchMu.Unlock()
 			b.writeLine([]byte(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`))
+			b.writeLine([]byte(`{"jsonrpc":"2.0","method":"notifications/prompts/list_changed"}`))
+			b.writeLine([]byte(`{"jsonrpc":"2.0","method":"notifications/resources/list_changed"}`))
 			return
 		}
 	}()
@@ -370,6 +417,55 @@ func (b *bridge) getProto() string {
 // writeLine emits exactly one newline-delimited JSON-RPC message. The body is
 // compacted so an indented server response never splits into multiple stdio
 // "lines" and corrupts framing for Claude's reader.
+// relaySSE writes each SSE event's data (one JSON-RPC message) as a line as
+// soon as it arrives: progress notifications first, the result last.
+func (b *bridge) relaySSE(r io.Reader) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), 64<<20)
+	var data bytes.Buffer
+	flush := func() {
+		if data.Len() == 0 {
+			return
+		}
+		msg := append([]byte(nil), data.Bytes()...)
+		data.Reset()
+		b.captureProto(msg)
+		b.writeLine(msg)
+	}
+	for sc.Scan() {
+		line := sc.Text()
+		switch {
+		case line == "":
+			flush()
+		case strings.HasPrefix(line, "data:"):
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+	}
+	flush()
+}
+
+// cancelInflight aborts the HTTP call of the request a cancellation names;
+// the server sees the closed request and stops the work it drives.
+func (b *bridge) cancelInflight(msg []byte) {
+	var m struct {
+		Params struct {
+			RequestID json.RawMessage `json:"requestId"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(msg, &m) != nil || len(m.Params.RequestID) == 0 {
+		return
+	}
+	b.inflightMu.Lock()
+	cancel := b.inflight[string(m.Params.RequestID)]
+	b.inflightMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func (b *bridge) writeLine(body []byte) {
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, body); err != nil {
