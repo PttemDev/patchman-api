@@ -1,5 +1,7 @@
 # PatchMan API
 
+[![Slack: join the community](https://img.shields.io/badge/Slack-join_the_community-4A154B?logo=slack&logoColor=white)](https://join.slack.com/t/patchman-workspace/shared_invite/zt-4hjqey19u-~AxNN3qSh51RbOsedKTwdw)
+
 Self-hosted API development & testing platform backend. Built with Go, Gin, and PostgreSQL (or SQLite).
 
 This is the backend. For the product overview, screenshots, the MCP guide for AI agents and a quick start that runs the backend together with the web UI, see the [patchman-ui README](https://github.com/PttemDev/patchman-ui#readme).
@@ -165,3 +167,7 @@ db/
   docker-compose.yml    # PostgreSQL setup
   init.sql              # Extensions (uuid, trigram, unaccent)
 ```
+
+## Community
+
+Join the [PatchMan Slack workspace](https://join.slack.com/t/patchman-workspace/shared_invite/zt-4hjqey19u-~AxNN3qSh51RbOsedKTwdw) to ask questions, share feedback and ideas, and hear about new releases. Bug reports and feature requests are also welcome as GitHub issues.

@@ -2,6 +2,8 @@
 
 Thanks for helping out. Bug reports, fixes, new connection types and tests are all welcome.
 
+Before starting on a bigger change, or if you get stuck, ask in the [PatchMan Slack workspace](https://join.slack.com/t/patchman-workspace/shared_invite/zt-4hjqey19u-~AxNN3qSh51RbOsedKTwdw).
+
 ## Setup
 
 You need Go 1.26 (use the latest 1.26.x patch release). The web UI lives in [patchman-ui](https://github.com/PttemDev/patchman-ui). Follow its **Quick start** to run both together, or just run the backend:
