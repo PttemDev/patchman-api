@@ -116,6 +116,9 @@ func (h *RequestHandler) Get(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Request not found"})
 		return
 	}
+	if noteSource(c) == noteSourceMCP && !requestShowsSecrets(h.db, req.CollectionID) {
+		req = maskRequestSecrets(req)
+	}
 
 	c.JSON(http.StatusOK, gin.H{"data": req})
 }
@@ -139,6 +142,26 @@ func (h *RequestHandler) Update(c *gin.Context) {
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// An agent shown "***" for a secret and writing it back keeps the
+	// stored value.
+	if noteSource(c) == noteSourceMCP {
+		for _, f := range []struct {
+			name   string
+			in     *string
+			stored string
+		}{{"url", input.URL, req.URL}, {"headers", input.Headers, req.Headers}, {"params", input.Params, req.Params}, {"body", input.Body, req.Body}, {"auth", input.Auth, req.Auth}} {
+			if f.in == nil {
+				continue
+			}
+			v, err := restoreRequestField(f.name, *f.in, f.stored)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			*f.in = v
+		}
 	}
 
 	updates := map[string]interface{}{}

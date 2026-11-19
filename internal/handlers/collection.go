@@ -101,6 +101,9 @@ type updateCollectionInput struct {
 	// "leave as-is". Must point at a collection the user owns or has edit
 	// access to (validated below).
 	ParentID *string `json:"parentId"`
+	// MCPShowSecrets: let AI agents see this collection's secret values
+	// (top-level collection owner only).
+	MCPShowSecrets *bool `json:"mcpShowSecrets"`
 }
 
 type collectionResponse struct {
@@ -292,6 +295,13 @@ func (h *CollectionHandler) List(c *gin.Context) {
 		}
 	}
 
+	if noteSource(c) == noteSourceMCP {
+		for k := range result {
+			if !result[k].MCPShowSecrets {
+				maskCollectionTree(&result[k].Collection)
+			}
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"data": result})
 }
 
@@ -539,6 +549,20 @@ func (h *CollectionHandler) Update(c *gin.Context) {
 	if input.BaseURL != nil {
 		updates["base_url"] = *input.BaseURL
 	}
+	if input.MCPShowSecrets != nil {
+		var col models.Collection
+		h.db.Select("id", "user_id", "parent_id").First(&col, "id = ?", id)
+		if col.UserID != userID || (col.ParentID != nil && *col.ParentID != "") {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Only the owner of a top-level collection can let AI agents see its secret values"})
+			return
+		}
+		// An agent can't widen its own access.
+		if noteSource(c) == noteSourceMCP && *input.MCPShowSecrets {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Only a person can turn on showing secret values to AI agents, in the collection's settings"})
+			return
+		}
+		updates["mcp_show_secrets"] = *input.MCPShowSecrets
+	}
 	if input.SortOrder != nil {
 		updates["sort_order"] = *input.SortOrder
 	}
@@ -694,6 +718,11 @@ func (h *CollectionHandler) ListRequests(c *gin.Context) {
 		Find(&requests).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch requests"})
 		return
+	}
+	if noteSource(c) == noteSourceMCP && !requestShowsSecrets(h.db, collectionID) {
+		for i := range requests {
+			requests[i] = maskRequestSecrets(requests[i])
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": requests})

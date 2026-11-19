@@ -55,6 +55,59 @@ func registerServiceMapTools(s *mcpsdk.Server, c *caller) {
 		})
 }
 
+type newRelicNRQLIn struct {
+	ConnectionID string `json:"connectionId" jsonschema:"a New Relic observability connection id (see list_observability_connections, provider newrelic)"`
+	Query        string `json:"query" jsonschema:"one NRQL query, e.g. SELECT count(*) FROM Transaction WHERE appName = 'checkout' FACET name SINCE 1 hour ago. NRQL only reads"`
+	AccountID    string `json:"accountId,omitempty" jsonschema:"New Relic account id (default: the connection's)"`
+}
+
+type newRelicEntitiesIn struct {
+	ConnectionID string `json:"connectionId" jsonschema:"a New Relic observability connection id"`
+	Query        string `json:"query,omitempty" jsonschema:"New Relic entity search, e.g. domainType IN ('APM-APPLICATION') or name LIKE 'checkout'; a plain word searches names (default: all APM applications)"`
+	Max          int    `json:"max,omitempty" jsonschema:"at most this many entities (default 200)"`
+}
+
+type newRelicAlertsIn struct {
+	ConnectionID string `json:"connectionId" jsonschema:"a New Relic observability connection id"`
+	AccountID    string `json:"accountId,omitempty" jsonschema:"New Relic account id (default: the connection's)"`
+	Hours        int    `json:"hours,omitempty" jsonschema:"look back this many hours (default 24)"`
+	OpenOnly     bool   `json:"openOnly,omitempty" jsonschema:"only incidents still open"`
+}
+
+// registerNewRelicTools: NRQL, entity search and alert incidents on a New
+// Relic connection (read-only; the stored user key stays in PatchMan).
+func registerNewRelicTools(s *mcpsdk.Server, c *caller) {
+	regCtx(s, "newrelic_nrql", "Run one NRQL query on a New Relic connection and get its result rows (Transaction, Span, Log, Metric, SystemSample, NrAiIncident…). Read-only. Add SINCE / LIMIT to keep it small."+connNote,
+		func(ctx context.Context, in newRelicNRQLIn) (int, string) {
+			return c.callCtx(ctx, "POST", "/api/observability-connections/"+url.PathEscape(in.ConnectionID)+"/newrelic/nrql", map[string]string{"query": in.Query, "accountId": in.AccountID})
+		})
+	regCtx(s, "newrelic_entities", "Search New Relic entities (APM applications, hosts, browser apps, …) with their guid, type, account, whether they report and their alert severity. Read-only."+connNote,
+		func(ctx context.Context, in newRelicEntitiesIn) (int, string) {
+			v := url.Values{}
+			if in.Query != "" {
+				v.Set("q", in.Query)
+			}
+			if in.Max > 0 {
+				v.Set("max", fmt.Sprint(in.Max))
+			}
+			return c.callCtx(ctx, "GET", withQuery("/api/observability-connections/"+url.PathEscape(in.ConnectionID)+"/newrelic/entities", v), nil)
+		})
+	regCtx(s, "newrelic_alerts", "New Relic alert incidents of the last hours (title, priority, open / closed, entity, condition, policy), open ones first. Read-only."+connNote,
+		func(ctx context.Context, in newRelicAlertsIn) (int, string) {
+			v := url.Values{}
+			if in.AccountID != "" {
+				v.Set("accountId", in.AccountID)
+			}
+			if in.Hours > 0 {
+				v.Set("hours", fmt.Sprint(in.Hours))
+			}
+			if in.OpenOnly {
+				v.Set("open", "1")
+			}
+			return c.callCtx(ctx, "GET", withQuery("/api/observability-connections/"+url.PathEscape(in.ConnectionID)+"/newrelic/alerts", v), nil)
+		})
+}
+
 type smNode struct {
 	ID, Kind, Subtype, Namespace, Name, Health string
 	Stats                                      smStats

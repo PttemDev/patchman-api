@@ -13,6 +13,9 @@ type Environment struct {
 	WorkspaceID string    `gorm:"type:varchar(36);index" json:"workspaceId,omitempty"`
 	Name        string    `gorm:"type:varchar(255);not null" json:"name"`
 	Variables   string    `gorm:"type:text" json:"variables"` // JSON [{key, value, enabled, secret}]
+	// MCPShowSecrets: AI agents over MCP see the values of secret variables.
+	// Off by default — they get "***".
+	MCPShowSecrets bool `gorm:"default:false" json:"mcpShowSecrets"`
 	IsActive    bool      `gorm:"default:false" json:"isActive"`
 	// Visibility mirrors Collection.Visibility — see that field's comment
 	// for the model. Existing rows default to 'private' on AutoMigrate.

@@ -9,6 +9,7 @@ const MemoryInstructions = `PatchMan notes hold the user's long-term memory and 
 - You can have several memories: your personal one plus team, shared and "everyone" memories other people gave you access to. recall searches all of them; personal hits have no tag, others are tagged [team: …], [shared by …] or [everyone]. memory_folders lists every memory you can read.
 - Write recall's q as keywords (identifiers, names, versions) in the memories' language — usually English — plus synonyms; any of the words may match.
 - Save durable learnings with remember(text): decisions, root causes, conventions. One concept per call. It answers with the card's #id; [[Card title]] in the text links an existing card.
+- Tell remember how you know it — evidence: verified (you checked it), stated (the user said it), inferred (your conclusion), hearsay (unconfirmed) — and importance (core / normal / detail) when it matters. recall shows a card's rating ([inferred · 60%]); check an unverified card before relying on it.
 - Memories are grouped by project: by default the one you work in (your working directory). Pass project when the learning belongs to another one.
 - When the user asks what a colleague knows ("check Alex's notes"), recall(q, from: "Alex") — it searches only what that person shared with the user.
 - Don't save transient state, secrets, or what recall already returned.

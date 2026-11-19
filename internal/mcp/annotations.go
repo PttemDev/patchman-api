@@ -81,7 +81,7 @@ var toolKinds = map[string]toolKind{
 	"grafana_dashboards": readRemote, "grafana_dashboard": readRemote, "grafana_datasources": readRemote,
 	"grafana_panel_data": readRemote, "grafana_query": readRemote,
 	"graylog_streams": readRemote, "graylog_search": readRemote, "graylog_dashboards": readRemote,
-	"service_map": readRemote,
+	"service_map": readRemote, "newrelic_nrql": readRemote, "newrelic_entities": readRemote, "newrelic_alerts": readRemote,
 	// Git (GitLab)
 	"git_repos": readRemote, "git_file": readRemote,
 	"git_merge_requests": readRemote, "git_merge_request": readRemote, "git_merge_request_changes": readRemote,

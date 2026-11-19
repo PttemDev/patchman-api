@@ -282,8 +282,9 @@ func (h *WhiteboardCollabHandler) readPump(room *collabRoom, cl *collabClient) {
 		if err != nil {
 			return
 		}
-		// Viewers are read-only: their inbound frames are ignored (never relayed).
-		if !cl.canEdit {
+		// Viewers are read-only: only their cursor is relayed (so editors and
+		// other viewers see where they look); scene frames are dropped.
+		if !cl.canEdit && !isPointerFrame(msg) {
 			continue
 		}
 		// Stamp the sender id so peers can ignore their own echo, then relay the
@@ -366,4 +367,18 @@ func stampSender(msg []byte, id string) []byte {
 	}
 	out = append(out, rest...)
 	return out
+}
+
+// isPointerFrame reports whether a client frame is a cursor update
+// ({"type":"pointer","x":…,"y":…}) — the one thing a viewer may send.
+func isPointerFrame(msg []byte) bool {
+	if len(msg) > 512 {
+		return false
+	}
+	var f struct {
+		Type string   `json:"type"`
+		X    *float64 `json:"x"`
+		Y    *float64 `json:"y"`
+	}
+	return json.Unmarshal(msg, &f) == nil && f.Type == "pointer" && f.X != nil && f.Y != nil
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"patchman-be/internal/models"
+	"patchman-be/internal/notecards"
 	"patchman-be/internal/notesearch"
 	"patchman-be/internal/realtime"
 	"patchman-be/internal/services"
@@ -293,7 +294,7 @@ func (h *NoteHandler) full(n models.Note, role Role, userID string) gin.H {
 		"id": n.ID, "userId": n.UserID, "parentId": n.ParentID, "type": n.Type, "title": n.Title,
 		"slug": n.Slug, "icon": n.Icon, "body": n.Body, "sortOrder": n.SortOrder, "visibility": n.Visibility,
 		"version": n.Version, "createdBy": n.CreatedBy, "updatedBy": n.UpdatedBy,
-		"summary": n.Summary, "source": n.Source, "confidence": n.Confidence, "stale": n.Stale, "supersededBy": n.SupersededBy,
+		"summary": n.Summary, "source": n.Source, "confidence": n.Confidence, "evidence": n.Evidence, "importance": n.Importance, "stale": n.Stale, "supersededBy": n.SupersededBy,
 		"memory": n.Memory, "agent": n.Agent, "project": n.Project,
 		"updatedByName": userDisplayName(h.db, n.UpdatedBy), "createdByName": userDisplayName(h.db, n.CreatedBy),
 		"createdAt": n.CreatedAt, "updatedAt": n.UpdatedAt,
@@ -416,6 +417,11 @@ type updateNoteInput struct {
 	// Cards.
 	Summary *string `json:"summary"`
 	Stale   *bool   `json:"stale"`
+	// Rating (cards): how the writer knows it, how sure (0–1), how widely it
+	// applies. A person marking a card verified makes it fully trusted.
+	Evidence   *string  `json:"evidence"`
+	Confidence *float64 `json:"confidence"`
+	Importance *string  `json:"importance"`
 	// Memory turns a folder into an agent memory folder or back (owner only).
 	Memory *bool `json:"memory"`
 }
@@ -501,7 +507,7 @@ func (h *NoteHandler) Update(c *gin.Context) {
 	// An agent (MCP) doesn't rewrite a card a person wrote: the change is filed
 	// as a suggestion for them.
 	if noteSource(c) == noteSourceMCP && n.Type == "card" && n.Source == "human" &&
-		(in.Title != nil || in.Body != nil || in.Summary != nil || in.Stale != nil) {
+		(in.Title != nil || in.Body != nil || in.Summary != nil || in.Stale != nil || in.Evidence != nil || in.Confidence != nil || in.Importance != nil) {
 		h.suggest(n, "edit", userID, noteAgent(c), gin.H{"title": in.Title, "body": in.Body, "summary": in.Summary, "stale": in.Stale})
 		c.JSON(http.StatusAccepted, gin.H{"data": gin.H{"suggested": true, "hint": "written by a person — your change was added to the suggestions for them to accept"}})
 		return
@@ -515,6 +521,38 @@ func (h *NoteHandler) Update(c *gin.Context) {
 			return
 		}
 		h.db.Model(&models.Note{}).Where("id = ?", id).Update("memory", *in.Memory)
+		if in.Title == nil && in.Body == nil && in.Summary == nil && in.Stale == nil {
+			notifyNote(h.db, c, id, realtime.EventNoteUpdated)
+		}
+	}
+	if n.Type == "card" && (in.Evidence != nil || in.Confidence != nil || in.Importance != nil) {
+		updates := map[string]any{}
+		if in.Evidence != nil {
+			ev, err := notecards.NormalizeEvidence(*in.Evidence)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			conf := in.Confidence
+			// A person confirming it is the strongest evidence there is.
+			if conf == nil && ev == notecards.EvidenceVerified && noteSource(c) != noteSourceMCP {
+				one := 1.0
+				conf = &one
+			}
+			updates["evidence"] = ev
+			updates["confidence"] = notecards.ConfidenceFor(ev, conf)
+		} else if in.Confidence != nil {
+			updates["confidence"] = notecards.ConfidenceFor(n.Evidence, in.Confidence)
+		}
+		if in.Importance != nil {
+			imp, err := notecards.NormalizeImportance(*in.Importance)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			updates["importance"] = imp
+		}
+		h.db.Model(&models.Note{}).Where("id = ?", id).Updates(updates)
 		if in.Title == nil && in.Body == nil && in.Summary == nil && in.Stale == nil {
 			notifyNote(h.db, c, id, realtime.EventNoteUpdated)
 		}

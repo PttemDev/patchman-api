@@ -42,6 +42,10 @@ type rememberIn struct {
 	Project string `json:"project,omitempty" jsonschema:"the project this is about; cards are grouped by project (default: your working directory's name)"`
 	Key     string `json:"key,omitempty" jsonschema:"a stable id of where this memory comes from, e.g. the path of your own memory file: remembering the same key again replaces that card in place (title, summary and body) instead of adding a new one"`
 	Adopt   string `json:"adopt,omitempty" jsonschema:"with key: an existing card of yours (#id) that should take this key, when it was saved earlier under another title"`
+	// How the agent knows it — shown by recall and used to rank.
+	Evidence   string   `json:"evidence,omitempty" jsonschema:"how you know it: 'verified' (you checked it — code, logs, a run, docs), 'stated' (the user told you), 'inferred' (your own conclusion), 'hearsay' (heard or read somewhere, not confirmed). Always say it"`
+	Confidence *float64 `json:"confidence,omitempty" jsonschema:"how sure you are, 0 to 1; leave out to use the evidence's default (verified 0.95, stated 0.85, inferred 0.6, hearsay 0.4)"`
+	Importance string   `json:"importance,omitempty" jsonschema:"how widely it applies: 'core' (a project rule, decision or root cause), 'normal' (default), 'detail' (a one-off detail)"`
 }
 
 type linkNotesIn struct {
@@ -161,9 +165,14 @@ func registerNotesTools(s *mcpsdk.Server, c *caller) {
 			}
 			return code, out
 		})
-	reg(s, "remember", "Call when you learn something durable: a decision, root cause, convention or fact worth knowing next time. One concept per call, no secrets. It is filed as a knowledge card in your Agent Memory, under the project you work in, signed with your name as an agent; the answer names the card (#id) so you can link it.",
+	reg(s, "remember", "Call when you learn something durable: a decision, root cause, convention or fact worth knowing next time. One concept per call, no secrets. Say how you know it (evidence: verified / stated / inferred / hearsay) and, when it matters, how widely it applies (importance) — recall shows both and ranks by them. It is filed as a knowledge card in your Agent Memory, under the project you work in, signed with your name as an agent; the answer names the card (#id) so you can link it.",
 		func(in rememberIn) (int, string) {
-			code, out := c.cloudOrLocal("POST", "/api/notes/remember", map[string]string{"text": in.Text, "context": in.Context, "scope": in.Scope, "folderId": in.Folder, "project": in.Project, "key": in.Key, "adopt": in.Adopt})
+			body := map[string]any{"text": in.Text, "context": in.Context, "scope": in.Scope, "folderId": in.Folder, "project": in.Project, "key": in.Key, "adopt": in.Adopt,
+				"evidence": in.Evidence, "importance": in.Importance}
+			if in.Confidence != nil {
+				body["confidence"] = *in.Confidence
+			}
+			code, out := c.cloudOrLocal("POST", "/api/notes/remember", body)
 			if code >= 400 {
 				return code, out
 			}

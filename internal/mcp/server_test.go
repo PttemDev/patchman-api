@@ -168,8 +168,8 @@ func TestListTools(t *testing.T) {
 	for _, tl := range res.Tools {
 		got[tl.Name] = true
 	}
-	if len(got) != 133 {
-		t.Errorf("tool count = %d, want 133", len(got))
+	if len(got) != 136 {
+		t.Errorf("tool count = %d, want 136", len(got))
 	}
 	for _, want := range []string{
 		"list_collections", "create_collection", "update_collection", "delete_collection",

@@ -144,6 +144,8 @@ Re-checked for 1.67.1 (November 2026): `go build ./...`, `go vet ./...` and `go 
 
 Re-checked for 1.68.2 (November 2026): `go build ./...`, `go vet ./...` and `go test ./...` pass, and the changes since 1.67.1 were scanned for secrets, internal hostnames and personal names. `govulncheck` was not re-run for this version.
 
+Re-checked for 1.70.0 (November 2026): `go build ./...`, `go vet ./...` and `go test ./...` pass, and the changes since 1.68.2 (1.69.0 and 1.70.0) were scanned for secrets, internal hostnames and personal names. `govulncheck` was not re-run for this version.
+
 Build with Go 1.26.11 or newer. Older patch releases of the standard library contain known vulnerabilities.
 
 These checks are a point-in-time snapshot, not a security audit. Re-run `govulncheck ./...` regularly. To report a vulnerability, see `SECURITY.md`.

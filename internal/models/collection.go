@@ -23,6 +23,10 @@ type Collection struct {
 	// still stamped but unused for ParentID != nil.
 	Visibility  string       `gorm:"type:varchar(20);not null;default:'private'" json:"visibility"`
 	BaseURL     string       `gorm:"type:text" json:"baseUrl,omitempty"`                // base URL prepended to relative request paths
+	// MCPShowSecrets (top-level collections): AI agents over MCP see secret
+	// values (auth, Authorization / Cookie / API-key headers, passwords) of
+	// its requests. Off by default — they get "***".
+	MCPShowSecrets bool `gorm:"default:false" json:"mcpShowSecrets"`
 	SourceURL   string       `gorm:"type:text" json:"sourceUrl,omitempty"`              // original import URL (swagger/openapi)
 	SourceType  string       `gorm:"type:varchar(20)" json:"sourceType,omitempty"`      // swagger, postman, json, ""
 	LastSynced  *time.Time   `json:"lastSynced,omitempty"`

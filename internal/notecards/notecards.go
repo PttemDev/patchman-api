@@ -305,6 +305,10 @@ type Hit struct {
 	Project string
 	Score   float64
 	Rels    []Rel
+	// Rating is the card's trust tag ("inferred · 60%"; "" when unrated or a
+	// person's card) and Evidence its evidence value.
+	Rating   string
+	Evidence string
 }
 
 // NoMatch is recall's answer when nothing fits.
@@ -445,6 +449,9 @@ func hitHead(h Hit) string {
 	}
 	if h.Scope != "" {
 		tags = append(tags, h.Scope)
+	}
+	if h.Rating != "" {
+		tags = append(tags, h.Rating)
 	}
 	if len(tags) > 0 {
 		head += " [" + strings.Join(tags, " · ") + "]"

@@ -399,7 +399,7 @@ func (h *NoteHandler) recall(userID, q string, budget int, scopeFilter, project 
 	projects := newProjectResolver(h.db)
 	uses := map[string]float64{}
 	hitProjects := map[string]string{}
-	cols := []string{"id", "user_id", "parent_id", "type", "title", "summary", "body", "stale", "superseded_by", "use_count"}
+	cols := []string{"id", "user_id", "parent_id", "type", "title", "summary", "body", "stale", "superseded_by", "use_count", "source", "confidence", "evidence", "importance"}
 	readable := map[string]bool{}
 	canRead := func(n models.Note) bool {
 		if v, ok := readable[n.ID]; ok {
@@ -429,6 +429,15 @@ func (h *NoteHandler) recall(userID, q string, budget int, scopeFilter, project 
 			line = notesearch.Snippet(n.Body, terms, 140)
 		}
 		hit := notecards.Hit{ID: n.ID, Title: n.Title, Line: line, Body: n.Body, Scope: scopes.scope(userID, n.ID).Label(), Score: score}
+		// Trust and reach order near-ties (a verified rule above a rumour);
+		// a person's card (source human) is first-hand and stays neutral.
+		if n.Source == "agent" {
+			hit.Rating = notecards.RatingTag(n.Evidence, n.Confidence)
+			hit.Evidence = n.Evidence
+			hit.Score *= notecards.RankWeight(n.Evidence, n.Confidence, n.Importance)
+		} else if n.Importance != "" {
+			hit.Score *= notecards.RankWeight("", 1, n.Importance)
+		}
 		if p := projects.of(n.ParentID); p.key != "" {
 			if p.key == project {
 				hit.Score *= projectBoost
@@ -526,6 +535,9 @@ func (h *NoteHandler) recall(userID, q string, budget int, scopeFilter, project 
 	for _, hit := range hits {
 		ids = append(ids, hit.ID)
 	}
+	if len(hits) > 0 && (hits[0].Evidence == notecards.EvidenceHearsay || hits[0].Evidence == notecards.EvidenceInferred) {
+		hints = append(hints, "#"+notecards.ShortID(hits[0].ID)+" is "+hits[0].Rating+" — check it (code, logs, a run) before relying on it; once confirmed, remember it again with evidence verified.")
+	}
 	if sentenceLike(q) {
 		hints = append(hints, "q reads like a sentence; recall matches words — for better hits send keywords in the memories' language (names, identifiers, versions) plus synonyms.")
 	}
@@ -553,6 +565,12 @@ type rememberInput struct {
 	// when no card has it yet — for memories filed before keys existed
 	// under a different title.
 	Adopt string `json:"adopt"`
+	// How the agent knows it: verified | stated | inferred | hearsay.
+	Evidence string `json:"evidence"`
+	// 0–1; defaults from evidence when left out.
+	Confidence *float64 `json:"confidence"`
+	// How widely it applies: core | normal | detail.
+	Importance string `json:"importance"`
 }
 
 // rememberMaxRunes caps one memory (characters, not bytes: Turkish text
@@ -590,6 +608,19 @@ func (h *NoteHandler) Remember(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "This looks like it contains a secret (" + kind + "). Memories are shared and kept — leave the secret out and remember the rest."})
 		return
 	}
+	ev, evErr := notecards.NormalizeEvidence(in.Evidence)
+	imp, impErr := notecards.NormalizeImportance(in.Importance)
+	if evErr != nil || impErr != nil || (in.Confidence != nil && (*in.Confidence < 0 || *in.Confidence > 1)) {
+		msg := "confidence must be between 0 and 1"
+		if evErr != nil {
+			msg = evErr.Error()
+		} else if impErr != nil {
+			msg = impErr.Error()
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		return
+	}
+	in.Evidence, in.Importance = ev, imp
 	in.Key = strings.TrimSpace(in.Key)
 	if len(in.Key) > 255 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "key is too long (255 characters max)"})
@@ -610,7 +641,7 @@ func (h *NoteHandler) Remember(c *gin.Context) {
 		}
 		folder = pf
 	}
-	item := models.NoteInbox{ID: uuid.New().String(), UserID: userID, FolderID: folder.ID, Text: in.Text, Context: in.Context, Agent: noteAgent(c), SourceKey: in.Key, Adopt: strings.TrimPrefix(strings.TrimSpace(in.Adopt), "#"), Status: "pending"}
+	item := models.NoteInbox{ID: uuid.New().String(), UserID: userID, FolderID: folder.ID, Text: in.Text, Context: in.Context, Agent: noteAgent(c), SourceKey: in.Key, Adopt: strings.TrimPrefix(strings.TrimSpace(in.Adopt), "#"), Evidence: in.Evidence, Confidence: in.Confidence, Importance: in.Importance, Status: "pending"}
 	done := make(chan struct{})
 	h.waiters.Store(item.ID, done)
 	defer h.waiters.Delete(item.ID)
@@ -645,6 +676,11 @@ func (h *NoteHandler) Remember(c *gin.Context) {
 			}
 		}
 		hints = filtered
+	}
+	// Ask how the agent knows it: recall shows it and weighs the card by it.
+	// A sync tool (keyed) mirrors files and has no way to say.
+	if in.Evidence == "" && in.Confidence == nil && in.Key == "" {
+		hints = append(hints, "Say how you know this: pass evidence (verified = you checked it in code, logs or a run; stated = the user said so; inferred = your own conclusion; hearsay = heard or read, not confirmed) and, if it matters, importance (core | normal | detail). Recall shows it and ranks by it.")
 	}
 	if len(hints) > 0 {
 		out["hints"] = hints
@@ -1014,18 +1050,27 @@ func (h *NoteHandler) upsertKeyed(item models.NoteInbox, folder models.Note) (st
 		return n.ID, "created", nil
 	}
 	if target.Title == title && target.Summary == summary && target.Body == body {
+		updates := map[string]any{}
 		if target.SourceKey != item.SourceKey {
-			h.db.Model(&models.Note{}).Where("id = ?", target.ID).Update("source_key", item.SourceKey)
+			updates["source_key"] = item.SourceKey
+		}
+		if target.Source == "agent" {
+			applyRating(updates, item)
+		}
+		if len(updates) > 0 {
+			h.db.Model(&models.Note{}).Where("id = ?", target.ID).Updates(updates)
 		}
 		return target.ID, "unchanged", nil
 	}
 	if !canEditNote(h.db, item.UserID, target.ID) {
 		return "", "", errString("not allowed to update the card with this key")
 	}
-	res := h.db.Model(&models.Note{}).Where("id = ?", target.ID).Updates(map[string]any{
+	updates := map[string]any{
 		"title": title, "summary": summary, "body": body, "source_key": item.SourceKey, "agent": item.Agent,
 		"stale": false, "version": gorm.Expr("version + 1"), "updated_by": item.UserID, "updated_at": time.Now(),
-	})
+	}
+	applyRating(updates, item)
+	res := h.db.Model(&models.Note{}).Where("id = ?", target.ID).Updates(updates)
 	if res.Error != nil {
 		return "", "", res.Error
 	}
@@ -1046,6 +1091,15 @@ func (h *NoteHandler) duplicateCard(item models.NoteInbox, folder models.Note, t
 	h.db.Select("id", "parent_id", "title", "body", "source").Where("parent_id = ? AND type = ?", folder.ID, "card").Find(&siblings)
 	for _, s := range siblings {
 		if norm(s.Body) == norm(body) {
+			// The same text again, now with a (better) rating: the agent's
+			// card takes it — a person's card is left as it is.
+			if s.Source == "agent" {
+				updates := map[string]any{}
+				applyRating(updates, item)
+				if len(updates) > 0 {
+					h.db.Model(&models.Note{}).Where("id = ?", s.ID).Updates(updates)
+				}
+			}
 			return s.ID, "duplicate"
 		}
 		if norm(s.Title) == norm(title) {
@@ -1070,7 +1124,8 @@ func (h *NoteHandler) createCard(item models.NoteInbox, folder models.Note, titl
 	n := models.Note{
 		ID: uuid.New().String(), UserID: folder.UserID, WorkspaceID: folder.WorkspaceID, ParentID: &pid, Type: "card",
 		SortOrder: order, Title: title, Slug: uniqueNoteSlug(h.db, folder.UserID, &pid, title, ""), Body: body,
-		Summary: summary, Source: "agent", Agent: item.Agent, Confidence: 0.8, Visibility: "private", Version: 1,
+		Summary: summary, Source: "agent", Agent: item.Agent, Visibility: "private", Version: 1,
+		Confidence: notecards.ConfidenceFor(item.Evidence, item.Confidence), Evidence: item.Evidence, Importance: item.Importance,
 		CreatedBy: item.UserID, UpdatedBy: item.UserID,
 	}
 	if err := h.db.Create(&n).Error; err != nil {
@@ -1186,4 +1241,17 @@ func dedupe(list []string) []string {
 		}
 	}
 	return out
+}
+
+// applyRating adds a re-remembered card's new rating to its updates: what
+// the writer stated replaces the old (a hearsay card remembered again as
+// verified moves up); nothing stated keeps the card's rating.
+func applyRating(updates map[string]any, item models.NoteInbox) {
+	if item.Evidence != "" || item.Confidence != nil {
+		updates["evidence"] = item.Evidence
+		updates["confidence"] = notecards.ConfidenceFor(item.Evidence, item.Confidence)
+	}
+	if item.Importance != "" {
+		updates["importance"] = item.Importance
+	}
 }

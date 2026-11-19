@@ -11,7 +11,11 @@ import (
 // ---- Collections -----------------------------------------------------------
 
 type listCollectionsIn struct {
-	WorkspaceID string `json:"workspaceId,omitempty" jsonschema:"optional workspace id to filter by"`
+	WorkspaceID  string `json:"workspaceId,omitempty" jsonschema:"optional workspace id to filter by"`
+	Name         string `json:"name,omitempty" jsonschema:"keep collections / folders whose name contains this (case-insensitive), with their whole subtree and the path to them"`
+	CollectionID string `json:"collectionId,omitempty" jsonschema:"only this collection or folder and what is inside it"`
+	Depth        int    `json:"depth,omitempty" jsonschema:"how many folder levels to show below each top-level collection (default: all); deeper folders are listed as counts"`
+	Requests     string `json:"requests,omitempty" jsonschema:"'summary' (default: id, name, method, url per request), 'count' (only how many) or 'none'. Full headers / body / auth: get_request"`
 }
 type createCollectionIn struct {
 	Name        string `json:"name" jsonschema:"collection name"`
@@ -34,13 +38,17 @@ type idIn struct {
 }
 
 func registerCollectionTools(s *mcpsdk.Server, c *caller) {
-	reg(s, "list_collections", "List the caller's collections (folders + collections tree, with their requests), in the order the app shows them: siblings by sortOrder, then creation time. Change the order with reorder_collections / reorder_requests.",
+	reg(s, "list_collections", "List the caller's collections as a tree (collections → folders → requests), in the order the app shows them: siblings by sortOrder, then creation time. Requests come as summaries (id, name, method, url); get_request has a request's headers, body and auth. Narrow a big tree with name (e.g. name: \"merchant\"), collectionId or depth. Change the order with reorder_collections / reorder_requests.",
 		func(in listCollectionsIn) (int, string) {
 			p := "/api/collections"
 			if in.WorkspaceID != "" {
 				p += "?workspaceId=" + url.QueryEscape(in.WorkspaceID)
 			}
-			return c.call("GET", p, nil)
+			code, body := c.call("GET", p, nil)
+			if code != 200 {
+				return code, body
+			}
+			return code, leanCollections(body, in)
 		})
 	reg(s, "create_collection", "Create a new collection or folder.",
 		func(in createCollectionIn) (int, string) { return c.call("POST", "/api/collections", in) })

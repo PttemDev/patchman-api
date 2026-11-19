@@ -208,13 +208,13 @@ func TestRememberLintHints(t *testing.T) {
 	if !strings.Contains(joined, "pass it as context") {
 		t.Errorf("hints: %v", hints)
 	}
-	r = mcpCall(t, h.Remember, "alice", "POST", nil, map[string]any{"text": "Lag runbook\nSee [[Kafka consumer lag alert]] — `orders-worker` scales to 6.", "context": "patchman://k8s/c1/prod/Deployment/orders-worker"}, "")
+	r = mcpCall(t, h.Remember, "alice", "POST", nil, map[string]any{"text": "Lag runbook\nSee [[Kafka consumer lag alert]] — `orders-worker` scales to 6.", "context": "patchman://k8s/c1/prod/Deployment/orders-worker", "evidence": "verified"}, "")
 	h.processInbox()
 	hints = nil
 	_ = json.Unmarshal(r.raw["data"], &struct {
 		Hints *[]string `json:"hints"`
 	}{&hints})
 	if len(hints) != 0 {
-		t.Errorf("a linked, anchored card needs no hints: %v", hints)
+		t.Errorf("a linked, anchored, rated card needs no hints: %v", hints)
 	}
 }

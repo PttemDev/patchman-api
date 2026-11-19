@@ -37,9 +37,14 @@ type Note struct {
 	// card is one fact / decision / root cause with a one-line Summary that
 	// recall shows instead of the body. Source says who wrote it (human |
 	// claude); Claude never changes a human's card without a suggestion.
-	Summary      string  `gorm:"type:varchar(255)" json:"summary,omitempty"`
-	Source       string  `gorm:"type:varchar(16)" json:"source,omitempty"` // human | agent
-	Confidence   float64 `gorm:"default:1" json:"confidence,omitempty"`
+	Summary    string  `gorm:"type:varchar(255)" json:"summary,omitempty"`
+	Source     string  `gorm:"type:varchar(16)" json:"source,omitempty"` // human | agent
+	Confidence float64 `gorm:"default:1" json:"confidence,omitempty"`
+	// Evidence: how the writer knows it (verified | stated | inferred |
+	// hearsay; "" = not stated). Importance: how widely it applies (core |
+	// normal | detail). Both set by remember(); see notecards/evidence.go.
+	Evidence     string  `gorm:"type:varchar(16)" json:"evidence,omitempty"`
+	Importance   string  `gorm:"type:varchar(8)" json:"importance,omitempty"`
 	Stale        bool    `gorm:"default:false" json:"stale,omitempty"`
 	SupersededBy *string `gorm:"type:varchar(36)" json:"supersededBy,omitempty"`
 	// Agent names the AI agent that wrote a card ("Claude Code", "Cursor" —
@@ -167,10 +172,15 @@ type NoteInbox struct {
 	// SourceKey: remember(key) — update the card with this key in place.
 	SourceKey string `gorm:"type:varchar(255)" json:"sourceKey,omitempty"`
 	// Adopt: remember(adopt) — an unkeyed agent card to take the key.
-	Adopt    string `gorm:"type:varchar(36)" json:"adopt,omitempty"`
-	Status   string `gorm:"type:varchar(16);default:'pending';index" json:"status"` // pending | processing | done | failed
-	Attempts int    `gorm:"default:0" json:"attempts"`
-	NoteID   string `gorm:"type:varchar(36)" json:"noteId,omitempty"` // the card it became (or the one it matched)
+	Adopt string `gorm:"type:varchar(36)" json:"adopt,omitempty"`
+	// How the agent knows it and how widely it applies (remember's evidence /
+	// confidence / importance); Confidence nil = not stated.
+	Evidence   string   `gorm:"type:varchar(16)" json:"evidence,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	Importance string   `gorm:"type:varchar(8)" json:"importance,omitempty"`
+	Status     string   `gorm:"type:varchar(16);default:'pending';index" json:"status"` // pending | processing | done | failed
+	Attempts   int      `gorm:"default:0" json:"attempts"`
+	NoteID     string   `gorm:"type:varchar(36)" json:"noteId,omitempty"` // the card it became (or the one it matched)
 	// Outcome: created | duplicate (same text already there) | merge (same
 	// title: a merge was suggested) | split (the model made several cards) |
 	// updated / unchanged (a keyed card was replaced / already matched) |

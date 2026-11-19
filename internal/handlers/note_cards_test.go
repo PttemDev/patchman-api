@@ -222,3 +222,73 @@ func TestLinkTypesAndHumanCardsAreSuggested(t *testing.T) {
 		t.Errorf("summary = title accepted: %d", r.code)
 	}
 }
+
+// remember's evidence / confidence / importance land on the card, recall
+// tags and orders by them, hints ask for a missing rating and to verify an
+// inferred top hit, and re-remembering the same text as verified upgrades it.
+func TestRememberEvidenceAndRecallRating(t *testing.T) {
+	db, h, _ := noteTestDB(t)
+	if r := mcpCall(t, h.Remember, "alice", "POST", nil, map[string]any{"text": "Kafka lag alert\nThe lag alert fires at 10k.", "evidence": "rumour"}, ""); r.code != 400 {
+		t.Fatalf("bad evidence = %d", r.code)
+	}
+	if r := mcpCall(t, h.Remember, "alice", "POST", nil, map[string]any{"text": "Kafka lag alert\nThe lag alert fires at 10k.", "confidence": 1.5}, ""); r.code != 400 {
+		t.Fatalf("bad confidence = %d", r.code)
+	}
+	// No rating → the hint asks for one; the card stays unrated (0.8, no tag).
+	r := mcpCall(t, h.Remember, "alice", "POST", nil, map[string]any{"text": "Orders topic retention\nOrders topic keeps 7 days of data in the orders cluster."}, "")
+	raw, _ := json.Marshal(r.data)
+	if !strings.Contains(string(raw), "Say how you know this") {
+		t.Errorf("missing rating hint: %s", raw)
+	}
+	mcpCall(t, h.Remember, "alice", "POST", nil, map[string]any{"text": "Orders lag threshold rumour\nSomeone said the orders lag alert fires at 10k messages.", "evidence": "hearsay"}, "")
+	mcpCall(t, h.Remember, "alice", "POST", nil, map[string]any{"text": "Orders lag threshold rule\nThe orders lag alert fires at 50k messages, set in alerts.yaml.", "evidence": "verified", "importance": "core"}, "")
+	h.processInbox()
+
+	var hearsay, rule, plain models.Note
+	db.Where("title = ?", "Orders lag threshold rumour").First(&hearsay)
+	db.Where("title = ?", "Orders lag threshold rule").First(&rule)
+	db.Where("title = ?", "Orders topic retention").First(&plain)
+	if hearsay.Evidence != "hearsay" || hearsay.Confidence != 0.4 {
+		t.Errorf("hearsay card = %q %v", hearsay.Evidence, hearsay.Confidence)
+	}
+	if rule.Evidence != "verified" || rule.Confidence != 0.95 || rule.Importance != "core" {
+		t.Errorf("rule card = %q %v %q", rule.Evidence, rule.Confidence, rule.Importance)
+	}
+	if plain.Evidence != "" || plain.Confidence != notecards.UnratedConfidence {
+		t.Errorf("unrated card = %q %v", plain.Evidence, plain.Confidence)
+	}
+
+	text := recallText(t, h, "alice", "orders+lag+alert+threshold", "2000")
+	iRule := strings.Index(text, "Orders lag threshold rule")
+	iRumour := strings.Index(text, "Orders lag threshold rumour")
+	if iRule < 0 || iRumour < 0 || iRule > iRumour {
+		t.Fatalf("verified core card must come first:\n%s", text)
+	}
+	if !strings.Contains(text, "[verified · 95%]") || !strings.Contains(text, "[hearsay · 40%]") {
+		t.Errorf("rating tags missing:\n%s", text)
+	}
+	if strings.Contains(text, "check it (code, logs") {
+		t.Errorf("verify hint for a verified top hit:\n%s", text)
+	}
+
+	// The same rumour text remembered again as verified upgrades the card.
+	mcpCall(t, h.Remember, "alice", "POST", nil, map[string]any{"text": "Orders lag threshold rumour\nSomeone said the orders lag alert fires at 10k messages.", "evidence": "inferred"}, "")
+	h.processInbox()
+	db.Where("id = ?", hearsay.ID).First(&hearsay)
+	if hearsay.Evidence != "inferred" || hearsay.Confidence != 0.6 {
+		t.Errorf("upgrade = %q %v", hearsay.Evidence, hearsay.Confidence)
+	}
+	text = recallText(t, h, "alice", "rumour", "2000")
+	if !strings.Contains(text, "is inferred · 60% — check it") {
+		t.Errorf("verify hint missing for inferred top hit:\n%s", text)
+	}
+
+	// A person marking it verified makes it fully trusted.
+	if r := noteCall(t, h.Update, "alice", "PATCH", gin.Params{{Key: "id", Value: hearsay.ID}}, map[string]any{"evidence": "verified"}, ""); r.code != 200 {
+		t.Fatalf("verify = %d %s", r.code, r.raw["error"])
+	}
+	db.Where("id = ?", hearsay.ID).First(&hearsay)
+	if hearsay.Evidence != "verified" || hearsay.Confidence != 1 {
+		t.Errorf("person verify = %q %v", hearsay.Evidence, hearsay.Confidence)
+	}
+}

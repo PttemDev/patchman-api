@@ -77,6 +77,8 @@ type updateEnvironmentInput struct {
 	Variables   *string `json:"variables"`
 	IsActive    *bool   `json:"isActive"`
 	WorkspaceID *string `json:"workspaceId"`
+	// MCPShowSecrets: let AI agents see secret variables (owner only).
+	MCPShowSecrets *bool `json:"mcpShowSecrets"`
 }
 
 // envVariable is the shape we serialise [{key, value, enabled, secret}]
@@ -276,6 +278,15 @@ func (h *EnvironmentHandler) List(c *gin.Context) {
 		})
 	}
 
+	// AI agents see secret variables as "***" unless the environment allows.
+	if noteSource(c) == noteSourceMCP {
+		for k := range out {
+			if !out[k].MCPShowSecrets {
+				out[k].Variables = maskSecretValues(out[k].Variables)
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"data": out})
 }
 
@@ -349,7 +360,19 @@ func (h *EnvironmentHandler) Update(c *gin.Context) {
 		updates["name"] = *input.Name
 	}
 	if input.Variables != nil {
-		updates["variables"] = *input.Variables
+		v := *input.Variables
+		// An agent shown "***" for a secret variable keeps its value.
+		if noteSource(c) == noteSourceMCP {
+			v = restoreSecretVars(v, env.Variables)
+		}
+		updates["variables"] = v
+	}
+	if input.MCPShowSecrets != nil {
+		if role != models.EnvRoleOwner || (noteSource(c) == noteSourceMCP && *input.MCPShowSecrets) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Only the owner, in the environment's settings, can let AI agents see secret values"})
+			return
+		}
+		updates["mcp_show_secrets"] = *input.MCPShowSecrets
 	}
 	// IsActive is now per-user. Honour it through the activation table
 	// instead of writing the legacy column. Owner toggling their own
@@ -1112,4 +1135,34 @@ func randomShareToken() string {
 	b := make([]byte, 4)
 	rand.Read(b)
 	return hex.EncodeToString(b) // 8 hex chars, mirrors collection share
+}
+
+// restoreSecretVars: a secret variable an agent sends back as "***" keeps its
+// stored value (matched by key).
+func restoreSecretVars(incoming, stored string) string {
+	in := decodeVars(incoming)
+	if in == nil {
+		return incoming
+	}
+	st := map[string]string{}
+	for _, v := range decodeVars(stored) {
+		st[v.Key] = v.Value
+	}
+	changed := false
+	for i := range in {
+		if in[i].Value == "***" {
+			if orig, ok := st[in[i].Key]; ok {
+				in[i].Value = orig
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return incoming
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		return incoming
+	}
+	return string(b)
 }

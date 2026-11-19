@@ -323,6 +323,7 @@ func BuildServerFor(engine *gin.Engine, jwtSecret, userID string, scopes mcpscop
 	}
 	if scopes.Allows(mcpscope.GroupObservability) {
 		registerServiceMapTools(s, c)
+		registerNewRelicTools(s, c)
 	}
 	if scopes.Allows(mcpscope.GroupGraylog) {
 		registerGraylogTools(s, c)
