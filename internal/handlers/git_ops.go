@@ -643,6 +643,19 @@ func (h *GitOpsHandler) Log(c *gin.Context) {
 		}
 		args = append(args, ref)
 	}
+	// path= narrows to one file or folder (IDE "Show History"); a file's
+	// history follows renames.
+	if rel := strings.Trim(strings.TrimSpace(c.Query("path")), "/"); rel != "" {
+		full, err := repoPath(repo, rel)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
+			args = append(args, "--follow")
+		}
+		args = append(args, "--", rel)
+	}
 
 	out, stderr, err := h.runGit(c.Request.Context(), nil, args...)
 	if err != nil {

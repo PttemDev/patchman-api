@@ -73,6 +73,11 @@ func (h *GitOpsHandler) porcelainStatus(c *gin.Context, dir string) (map[string]
 	if err != nil {
 		return st, ign
 	}
+	// Porcelain paths are relative to the repository root; a folder opened
+	// below the root lists its entries relative to itself, so strip the
+	// prefix (else nothing in the tree would ever be coloured).
+	prefix, _, _ := h.runGit(c.Request.Context(), nil, "-C", dir, "rev-parse", "--show-prefix")
+	prefix = strings.TrimSpace(prefix)
 	parts := strings.Split(out, "\x00")
 	for i := 0; i < len(parts); i++ {
 		e := parts[i]
@@ -82,6 +87,12 @@ func (h *GitOpsHandler) porcelainStatus(c *gin.Context, dir string) (map[string]
 		xy, p := e[:2], strings.TrimSuffix(e[3:], "/")
 		if xy[0] == 'R' || xy[0] == 'C' {
 			i++ // the old path follows
+		}
+		if prefix != "" {
+			if !strings.HasPrefix(p, prefix) {
+				continue // outside the opened folder
+			}
+			p = strings.TrimPrefix(p, prefix)
 		}
 		var s string
 		switch {

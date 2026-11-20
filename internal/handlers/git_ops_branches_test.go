@@ -173,6 +173,7 @@ func newGitRig(t *testing.T) *gitRig {
 	g.POST("/push-to", h.PushTo)
 	g.POST("/push-to/force", h.ForcePushTo)
 	g.GET("/ls", h.LsDir)
+	g.GET("/log", h.Log)
 	g.GET("/blame", h.Blame)
 	g.POST("/fs", h.FsOp)
 	g.GET("/grep", h.Grep)
@@ -578,5 +579,33 @@ func TestFsRollbackAndFolderStatus(t *testing.T) {
 	}
 	if st := run(t, g.work, "status", "--porcelain"); st != "" {
 		t.Fatalf("index still has it: %q", st)
+	}
+}
+
+func TestLogPathFilter(t *testing.T) {
+	g := newGitRig(t)
+	os.WriteFile(filepath.Join(g.work, "b.txt"), []byte("b\n"), 0o644)
+	run(t, g.work, "add", "b.txt")
+	run(t, g.work, "commit", "-m", "add b")
+	_, all := g.call("GET", "/log", nil)
+	_, onlyB := g.call("GET", "/log?path=b.txt", nil)
+	if len(all["data"].([]any)) < 2 || len(onlyB["data"].([]any)) != 1 {
+		t.Fatalf("all=%d onlyB=%d", len(all["data"].([]any)), len(onlyB["data"].([]any)))
+	}
+	if code, _ := g.call("GET", "/log?path=../etc", nil); code != 400 {
+		t.Fatal("path escape must be refused")
+	}
+}
+
+func TestLsStatusInSubfolderRepo(t *testing.T) {
+	g := newGitRig(t)
+	os.MkdirAll(filepath.Join(g.work, "svc", "pkg"), 0o755)
+	os.WriteFile(filepath.Join(g.work, "svc", "pkg", "x.go"), []byte("package pkg\n"), 0o644)
+	// porcelainStatus run in a subfolder must report paths relative to it.
+	gc, _ := gin.CreateTestContext(httptest.NewRecorder())
+	gc.Request = httptest.NewRequest("GET", "/", nil)
+	st, _ := g.h.porcelainStatus(gc, filepath.Join(g.work, "svc"))
+	if st["pkg/x.go"] != "untracked" || st["pkg"] != "modified" {
+		t.Fatalf("subfolder status: %v", st)
 	}
 }
