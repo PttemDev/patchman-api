@@ -84,6 +84,27 @@ func (h *RedisOpsHandler) ScanKeys(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": listing})
 }
 
+// Keyspace — GET /redis/:id/keyspace: keys per logical database ({"0": 12,
+// "3": 4}), for the DB picker. Metadata only, so not audited; a server that
+// disables INFO answers an empty map.
+func (h *RedisOpsHandler) Keyspace(c *gin.Context) {
+	conn, _, ok := h.access(c, false)
+	if !ok {
+		return
+	}
+	ctx, cancel := h.ctx(c, 10*time.Second)
+	defer cancel()
+	counts, err := h.registry.Keyspace(ctx, *conn)
+	if err != nil {
+		counts = map[int]int64{}
+	}
+	out := make(map[string]int64, len(counts))
+	for db, n := range counts {
+		out[strconv.Itoa(db)] = n
+	}
+	c.JSON(http.StatusOK, gin.H{"data": out})
+}
+
 func (h *RedisOpsHandler) KeyMeta(c *gin.Context) {
 	conn, role, ok := h.access(c, false)
 	if !ok {

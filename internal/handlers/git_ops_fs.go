@@ -212,7 +212,7 @@ func (h *GitOpsHandler) Blame(c *gin.Context) {
 }
 
 type gitFsInput struct {
-	Op      string `json:"op"` // create | mkdir | rename | delete
+	Op      string `json:"op"` // create | mkdir | rename | delete | rollback
 	Path    string `json:"path"`
 	NewPath string `json:"newPath"`
 	Content string `json:"content"`
@@ -309,8 +309,39 @@ func (h *GitOpsHandler) FsOp(c *gin.Context) {
 			fail(http.StatusInternalServerError, err.Error())
 			return
 		}
+	case "rollback":
+		// Back to HEAD, like an IDE's "Rollback": a file HEAD has is restored
+		// (index and working tree); a file HEAD doesn't have (new or
+		// untracked) is unstaged and removed. A folder rolls back its tracked
+		// files; untracked files in it stay.
+		if _, _, err := h.runGit(ctx, nil, "-C", repo.LocalPath, "cat-file", "-e", "HEAD:"+in.Path); err == nil {
+			if _, stderr, err := h.runGit(ctx, nil, "-C", repo.LocalPath, "restore", "--source=HEAD", "--staged", "--worktree", "--", in.Path); err != nil {
+				fail(http.StatusConflict, "git restore: "+gitErrMsg(stderr, err))
+				return
+			}
+			break
+		}
+		fi, err := os.Lstat(full)
+		if err != nil {
+			fail(http.StatusNotFound, "no such file or folder")
+			return
+		}
+		if fi.IsDir() {
+			fail(http.StatusBadRequest, "this folder isn't in HEAD; delete it instead")
+			return
+		}
+		if tracked(in.Path) {
+			if _, stderr, err := h.runGit(ctx, nil, "-C", repo.LocalPath, "rm", "--cached", "--quiet", "--", in.Path); err != nil {
+				fail(http.StatusConflict, "git rm: "+gitErrMsg(stderr, err))
+				return
+			}
+		}
+		if err := os.Remove(full); err != nil {
+			fail(http.StatusInternalServerError, err.Error())
+			return
+		}
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "op must be create, mkdir, rename or delete"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "op must be create, mkdir, rename, delete or rollback"})
 		return
 	}
 	auditGit(h.db, userID, repo.ConnectionID, "fs_"+in.Op, true, detail)

@@ -930,6 +930,7 @@ func main() {
 			api.DELETE("/redis-connections/:id/grants/:grantId", rGrantH.Delete)
 
 			api.GET("/redis/:id/keys", rOpsH.ScanKeys)
+			api.GET("/redis/:id/keyspace", rOpsH.Keyspace)
 			api.GET("/redis/:id/key/meta", rOpsH.KeyMeta)
 			api.GET("/redis/:id/key", rOpsH.GetValue)
 			api.POST("/redis/:id/command", rOpsH.RunCommand)

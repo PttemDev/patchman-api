@@ -150,6 +150,8 @@ Re-checked for 1.70.0 (November 2026): `go build ./...`, `go vet ./...` and `go 
 
 Re-checked for 1.72.0 (November 2026): `go build ./...`, `go vet ./...` and `go test ./...` pass, and the changes since 1.70.1 (1.71.0 to 1.72.0: service details for observability, the `service_detail` MCP tool, editable merge commit messages) and the new developer guide (`docs/dev/`, `AGENTS.md`) were scanned for secrets, internal hostnames and personal names. `govulncheck` was not re-run for this version.
 
+Re-checked for 1.73.0 (November 2026): `go build ./...`, `go vet ./...` and `go test ./...` pass, and the changes since 1.72.0 (Redis key counts per database, rolling back a file in a local Git working tree) were scanned for secrets, internal hostnames and personal names. `govulncheck` was not re-run for this version.
+
 Build with Go 1.26.11 or newer. Older patch releases of the standard library contain known vulnerabilities.
 
 These checks are a point-in-time snapshot, not a security audit. Re-run `govulncheck ./...` regularly. To report a vulnerability, see `SECURITY.md`.

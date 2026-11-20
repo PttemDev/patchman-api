@@ -535,3 +535,48 @@ func TestSearchGrepFilesSymbols(t *testing.T) {
 		t.Error("prefix search must not return unrelated names")
 	}
 }
+
+func TestFsRollbackAndFolderStatus(t *testing.T) {
+	g := newGitRig(t)
+	orig := run(t, g.work, "show", "HEAD:a.txt")
+
+	// A modified tracked file goes back to HEAD (index and working tree).
+	os.WriteFile(filepath.Join(g.work, "a.txt"), []byte("changed\n"), 0o644)
+	run(t, g.work, "add", "a.txt")
+	if code, out := g.call("POST", "/fs", map[string]any{"op": "rollback", "path": "a.txt"}); code != 200 {
+		t.Fatalf("rollback modified: %d %v", code, out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(g.work, "a.txt")); strings.TrimSpace(string(b)) != orig {
+		t.Fatalf("not restored: %q", b)
+	}
+	if st := run(t, g.work, "status", "--porcelain"); st != "" {
+		t.Fatalf("still changed: %q", st)
+	}
+
+	// A folder with a change under it is marked in its parent listing.
+	os.MkdirAll(filepath.Join(g.work, "src"), 0o755)
+	os.WriteFile(filepath.Join(g.work, "src", "new.go"), []byte("package src\n"), 0o644)
+	_, out := g.call("GET", "/ls?path=", nil)
+	found := false
+	for _, e := range out["data"].([]any) {
+		m := e.(map[string]any)
+		if m["path"] == "src" {
+			found = m["status"] == "modified"
+		}
+	}
+	if !found {
+		t.Fatalf("folder status: %v", out["data"])
+	}
+
+	// A new (staged) file not in HEAD is unstaged and removed.
+	run(t, g.work, "add", "src/new.go")
+	if code, out := g.call("POST", "/fs", map[string]any{"op": "rollback", "path": "src/new.go"}); code != 200 {
+		t.Fatalf("rollback new: %d %v", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(g.work, "src", "new.go")); !os.IsNotExist(err) {
+		t.Fatal("new file still on disk")
+	}
+	if st := run(t, g.work, "status", "--porcelain"); st != "" {
+		t.Fatalf("index still has it: %q", st)
+	}
+}
