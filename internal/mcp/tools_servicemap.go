@@ -53,6 +53,68 @@ func registerServiceMapTools(s *mcpsdk.Server, c *caller) {
 			}
 			return code, compactServiceMap(body)
 		})
+	regCtx(s, "service_detail", "One service's APM page: throughput, error rate, average / p95 / p99 latency and Apdex over a range, its busiest endpoints, error classes, instances, health checks and alert incidents — from New Relic, Coroot or Prometheus (OTel service graph, Istio, Linkerd, Hubble). Read-only. Get the arguments from service_map's detail: hints."+connNote,
+		func(ctx context.Context, in serviceDetailIn) (int, string) {
+			v := url.Values{}
+			for k, val := range map[string]string{"service": in.Service, "namespace": in.Namespace, "key": in.Key, "scope": in.Scope, "range": in.Range, "context": in.Context, "k8s": in.K8s} {
+				if val != "" {
+					v.Set(k, val)
+				}
+			}
+			path := "/api/service-map/service-detail"
+			if in.K8s == "" {
+				if in.ConnectionID == "" {
+					return 400, `{"error":"give connectionId (an observability connection) or k8s (a Kubernetes connection)"}`
+				}
+				path = "/api/observability-connections/" + url.PathEscape(in.ConnectionID) + "/service-detail"
+			}
+			code, body := c.callCtx(ctx, "GET", withQuery(path, v), nil)
+			if code != 200 || in.Charts {
+				return code, body
+			}
+			return code, dropDetailCharts(body)
+		})
+}
+
+// dropDetailCharts keeps the time series out of an agent's context unless
+// asked for (a week of charts is tens of KB): each chart becomes its id and
+// series names.
+func dropDetailCharts(body string) string {
+	var resp map[string]map[string]any
+	if err := json.Unmarshal([]byte(body), &resp); err != nil || resp["data"] == nil {
+		return body
+	}
+	charts, _ := resp["data"]["charts"].([]any)
+	out := make([]string, 0, len(charts))
+	for _, ch := range charts {
+		m, _ := ch.(map[string]any)
+		name := fmt.Sprint(m["id"])
+		if t, _ := m["title"].(string); t != "" {
+			name = t
+		}
+		out = append(out, name)
+	}
+	delete(resp["data"], "charts")
+	if len(out) > 0 {
+		resp["data"]["chartsOmitted"] = strings.Join(out, ", ") + " (pass charts=true for the series)"
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return body
+	}
+	return string(raw)
+}
+
+type serviceDetailIn struct {
+	ConnectionID string `json:"connectionId,omitempty" jsonschema:"observability connection the service came from (New Relic, Coroot, Prometheus); service_map prints it per node as detail: service_detail(…)"`
+	K8s          string `json:"k8s,omitempty" jsonschema:"instead of connectionId: a Kubernetes connection id, to read the cluster's own Prometheus"`
+	Context      string `json:"context,omitempty" jsonschema:"kubeconfig context with k8s (default: the connection's)"`
+	Service      string `json:"service" jsonschema:"the service name as that backend knows it (New Relic appName, OTel service name, workload name)"`
+	Namespace    string `json:"namespace,omitempty" jsonschema:"the service's namespace, when the backend has one"`
+	Key          string `json:"key,omitempty" jsonschema:"the backend's own id (required for Coroot: the application id)"`
+	Scope        string `json:"scope,omitempty" jsonschema:"provider scope (New Relic account id, Coroot project); default: the connection's"`
+	Range        string `json:"range,omitempty" jsonschema:"30m | 1h (default) | 6h | 24h | 7d"`
+	Charts       bool   `json:"charts,omitempty" jsonschema:"include the time series (large); default: summary, endpoints, errors, instances, checks and alerts only"`
 }
 
 type newRelicNRQLIn struct {
@@ -138,6 +200,13 @@ func compactServiceMap(body string) string {
 					Tool string `json:"tool"`
 					Name string `json:"name"`
 				} `json:"connection"`
+				Refs []struct {
+					Conn      string `json:"conn"`
+					Scope     string `json:"scope"`
+					Name      string `json:"name"`
+					Namespace string `json:"namespace"`
+					Key       string `json:"key"`
+				} `json:"refs"`
 			} `json:"nodes"`
 			Edges []struct {
 				From     string   `json:"from"`
@@ -191,6 +260,26 @@ func compactServiceMap(body string) string {
 		}
 		if n.Connection != nil {
 			fmt.Fprintf(&b, " · PatchMan %s connection %q", n.Connection.Tool, n.Connection.Name)
+		}
+		for i, r := range n.Refs {
+			if n.Kind != "service" || i > 0 {
+				break // one hint per service; datastores / externals have no page
+			}
+			if strings.HasPrefix(r.Conn, "k8s:") {
+				fmt.Fprintf(&b, " · detail: service_detail(k8s=%s, service=%q", strings.TrimPrefix(r.Conn, "k8s:"), r.Name)
+			} else {
+				fmt.Fprintf(&b, " · detail: service_detail(connectionId=%s, service=%q", r.Conn, r.Name)
+			}
+			if r.Namespace != "" {
+				fmt.Fprintf(&b, ", namespace=%q", r.Namespace)
+			}
+			if r.Key != "" {
+				fmt.Fprintf(&b, ", key=%q", r.Key)
+			}
+			if r.Scope != "" {
+				fmt.Fprintf(&b, ", scope=%q", r.Scope)
+			}
+			b.WriteString(")")
 		}
 		b.WriteString("\n")
 	}

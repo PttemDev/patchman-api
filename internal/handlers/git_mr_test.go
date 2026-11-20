@@ -175,6 +175,15 @@ func TestMRWorkflowAgainstFakeGitLab(t *testing.T) {
 	if b := calls()[len(calls())-1].Body; b["sha"] != "abc" || b["squash"] != true {
 		t.Fatalf("merge body: %v", b)
 	}
+	// An edited message goes to merge_commit_message (or squash_commit_message when squashing).
+	callMR(h.MergeMR, "owner", "POST", "project=7&iid=4", map[string]any{"mergeCommitMessage": "Merge branch 'a' into 'main'\n\nWhy", "squashCommitMessage": "ignored"})
+	if b := calls()[len(calls())-1].Body; b["merge_commit_message"] != "Merge branch 'a' into 'main'\n\nWhy" || b["squash_commit_message"] != nil {
+		t.Fatalf("merge message body: %v", b)
+	}
+	callMR(h.MergeMR, "owner", "POST", "project=7&iid=4", map[string]any{"squash": true, "squashCommitMessage": "One commit", "mergeCommitMessage": "ignored"})
+	if b := calls()[len(calls())-1].Body; b["squash_commit_message"] != "One commit" || b["merge_commit_message"] != nil {
+		t.Fatalf("squash message body: %v", b)
+	}
 	if !middleware.IsSensitiveRoute("POST", "/api/git/connections/c1/merge_request_merge") {
 		t.Fatal("merge must need step-up")
 	}

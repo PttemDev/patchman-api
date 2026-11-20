@@ -346,7 +346,7 @@ Query:
 				return promptText("Incident: "+a["service"], fmt.Sprintf(`Investigate an incident. Service: %s. Symptom: %s. Since: %s.
 Work read-only unless the user says otherwise.
 1. recall(q: "%s incident runbook") — past incidents, runbooks, owners.
-2. service_map — callers / dependencies of the service and their error rates.
+2. service_map — callers / dependencies of the service and their error rates; then service_detail for its throughput, latency, error classes and alerts over the window.
 3. Kubernetes: k8s_list_resources / k8s_get_resource for its pods (restarts, OOMKilled, pending), recent rollouts.
 4. Logs: graylog_search or es_data_view_search for errors in the window; group them by message.
 5. Dashboards: grafana_query for latency / error rate around the start time.

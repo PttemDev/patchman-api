@@ -168,8 +168,8 @@ func TestListTools(t *testing.T) {
 	for _, tl := range res.Tools {
 		got[tl.Name] = true
 	}
-	if len(got) != 136 {
-		t.Errorf("tool count = %d, want 136", len(got))
+	if len(got) != 137 {
+		t.Errorf("tool count = %d, want 137", len(got))
 	}
 	for _, want := range []string{
 		"list_collections", "create_collection", "update_collection", "delete_collection",
@@ -199,7 +199,7 @@ func TestListTools(t *testing.T) {
 		"list_notes", "search_notes", "get_note", "create_note", "update_note", "delete_note",
 		"grafana_datasources", "grafana_dashboards", "grafana_dashboard", "grafana_panel_data", "grafana_query",
 		"rabbitmq_overview", "rabbitmq_queues", "rabbitmq_queue", "rabbitmq_exchanges", "rabbitmq_topology",
-		"list_observability_connections", "service_map",
+		"list_observability_connections", "service_map", "service_detail",
 		"rabbitmq_peek", "rabbitmq_publish",
 		"list_graylog_connections", "graylog_streams", "graylog_search", "graylog_dashboards",
 	} {

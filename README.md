@@ -148,6 +148,8 @@ Re-checked for 1.68.2 (November 2026): `go build ./...`, `go vet ./...` and `go 
 
 Re-checked for 1.70.0 (November 2026): `go build ./...`, `go vet ./...` and `go test ./...` pass, and the changes since 1.68.2 (1.69.0 and 1.70.0) were scanned for secrets, internal hostnames and personal names. `govulncheck` was not re-run for this version.
 
+Re-checked for 1.72.0 (November 2026): `go build ./...`, `go vet ./...` and `go test ./...` pass, and the changes since 1.70.1 (1.71.0 to 1.72.0: service details for observability, the `service_detail` MCP tool, editable merge commit messages) and the new developer guide (`docs/dev/`, `AGENTS.md`) were scanned for secrets, internal hostnames and personal names. `govulncheck` was not re-run for this version.
+
 Build with Go 1.26.11 or newer. Older patch releases of the standard library contain known vulnerabilities.
 
 These checks are a point-in-time snapshot, not a security audit. Re-run `govulncheck ./...` regularly. To report a vulnerability, see `SECURITY.md`.
@@ -167,6 +169,10 @@ db/
   docker-compose.yml    # PostgreSQL setup
   init.sql              # Extensions (uuid, trigram, unaccent)
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the pull request flow. The [developer guide](docs/dev/README.md) explains the architecture, the rules the code relies on, the MCP server, recipes for common changes and how to test them. AI coding agents read [AGENTS.md](AGENTS.md) (Claude Code loads it through `CLAUDE.md`).
 
 ## Community
 

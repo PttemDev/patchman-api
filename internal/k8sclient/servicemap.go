@@ -310,6 +310,39 @@ func (q clusterProm) Query(ctx context.Context, expr string, at time.Time) ([]se
 	return out, nil
 }
 
+// QueryRange runs a range query through the same service proxy.
+func (q clusterProm) QueryRange(ctx context.Context, expr string, start, end time.Time, step time.Duration) ([]servicemap.RangeSample, error) {
+	if step < time.Second {
+		step = time.Minute
+	}
+	raw, err := q.p.clientset.CoreV1().RESTClient().Get().
+		AbsPath("api", "v1", "namespaces", q.tgt.Namespace, "services", q.tgt.Service+":"+q.tgt.Port, "proxy", "api", "v1", "query_range").
+		Param("query", expr).Param("start", strconv.FormatInt(start.Unix(), 10)).Param("end", strconv.FormatInt(end.Unix(), 10)).
+		Param("step", strconv.Itoa(int(step.Seconds()))).
+		DoRaw(ctx)
+	if err != nil {
+		return nil, promHTTPErr(err)
+	}
+	var resp promResp
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("prometheus answer was not JSON")
+	}
+	if resp.Status != "success" {
+		return nil, fmt.Errorf("prometheus: %s", resp.Error)
+	}
+	out := make([]servicemap.RangeSample, 0, len(resp.Data.Result))
+	for _, s := range resp.Data.Result {
+		rs := servicemap.RangeSample{Metric: s.Metric}
+		for _, v := range s.Values {
+			if pt, ok := parsePromValue(v); ok {
+				rs.Points = append(rs.Points, [2]float64{float64(pt.T), pt.Val})
+			}
+		}
+		out = append(out, rs)
+	}
+	return out, nil
+}
+
 // ClusterPrometheus returns a querier for the cluster's own Prometheus, or
 // found=false when none is discoverable.
 func (r *Registry) ClusterPrometheus(ctx context.Context, conn models.K8sConnection, contextName string) (servicemap.PromQuerier, string, bool, error) {

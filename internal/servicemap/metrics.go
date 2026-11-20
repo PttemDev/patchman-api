@@ -433,3 +433,14 @@ func isErrorStatus(status string) bool {
 }
 
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// RangeSample is one series of a range query: [unix ms, value] points.
+type RangeSample struct {
+	Metric map[string]string
+	Points [][2]float64
+}
+
+// PromRangeQuerier runs range queries (charts of the service detail).
+type PromRangeQuerier interface {
+	QueryRange(ctx context.Context, q string, start, end time.Time, step time.Duration) ([]RangeSample, error)
+}

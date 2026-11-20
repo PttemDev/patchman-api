@@ -212,6 +212,18 @@ type mrMergeInput struct {
 	MergeWhenPipelineSucceeds bool   `json:"mergeWhenPipelineSucceeds"`
 	SHA                       string `json:"sha"`
 	SquashCommitMessage       string `json:"squashCommitMessage"`
+	// MergeCommitMessage replaces the default merge commit message (no squash).
+	MergeCommitMessage string `json:"mergeCommitMessage"`
+}
+
+// commitMessage is the message the user edited for this merge ("" = the
+// provider's default): the squash message when squashing, else the merge
+// commit's.
+func (in mrMergeInput) commitMessage() string {
+	if in.Squash {
+		return strings.TrimSpace(in.SquashCommitMessage)
+	}
+	return strings.TrimSpace(in.MergeCommitMessage)
 }
 
 // MergeMR — POST /git/connections/:id/merge_request_merge?project=&iid=
@@ -246,8 +258,12 @@ func (h *GitRemoteHandler) MergeMR(c *gin.Context) {
 	if s := strings.TrimSpace(in.SHA); s != "" {
 		body["sha"] = s
 	}
-	if m := strings.TrimSpace(in.SquashCommitMessage); m != "" && in.Squash {
-		body["squash_commit_message"] = m
+	if m := in.commitMessage(); m != "" {
+		if in.Squash {
+			body["squash_commit_message"] = m
+		} else {
+			body["merge_commit_message"] = m
+		}
 	}
 	out, ok := h.gitlabWrite(c, token, userID, conn.ID, "merge_request_merge", http.MethodPut, mrPath(project, iid)+"/merge", body,
 		gin.H{"project": project, "iid": iid, "squash": in.Squash, "auto": in.MergeWhenPipelineSucceeds})

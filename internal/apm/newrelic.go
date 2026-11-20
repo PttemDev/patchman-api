@@ -192,10 +192,16 @@ func NewRelicEntities(ctx context.Context, c *Client, query string, max int) ([]
 // NewRelicAlerts lists alert incidents of the last `since` (NRQL over
 // NrAiIncident): open ones first. openOnly drops the closed ones.
 func NewRelicAlerts(ctx context.Context, c *Client, account int, since time.Duration, openOnly bool) ([]map[string]any, error) {
+	return newRelicAlertsWhere(ctx, c, account, since, openOnly, "")
+}
+
+// newRelicAlertsWhere is NewRelicAlerts narrowed by an NRQL WHERE clause
+// (e.g. one entity's incidents).
+func newRelicAlertsWhere(ctx context.Context, c *Client, account int, since time.Duration, openOnly bool, where string) ([]map[string]any, error) {
 	if since < time.Hour {
 		since = 24 * time.Hour
 	}
-	nrql := fmt.Sprintf("SELECT latest(title) AS title, latest(priority) AS priority, latest(event) AS state, latest(entity.name) AS entity, latest(conditionName) AS condition, latest(policyName) AS policy, min(timestamp) AS openedAt FROM NrAiIncident FACET incidentId SINCE %d hours ago LIMIT 200", int(math.Ceil(since.Hours())))
+	nrql := fmt.Sprintf("SELECT latest(title) AS title, latest(priority) AS priority, latest(event) AS state, latest(entity.name) AS entity, latest(conditionName) AS condition, latest(policyName) AS policy, min(timestamp) AS openedAt FROM NrAiIncident %s FACET incidentId SINCE %d hours ago LIMIT 200", where, int(math.Ceil(since.Hours())))
 	rows, err := NewRelicNRQL(ctx, c, account, nrql)
 	if err != nil {
 		return nil, err
@@ -229,6 +235,7 @@ func (newRelicProvider) Map(ctx context.Context, c *Client, req MapRequest, b *s
 	ids := map[string]string{} // guid → node id
 	for _, e := range apps {
 		id := b.ServiceNode("", e.Name, "newrelic")
+		b.AddRef(id, "newrelic", e.Name, "", e.GUID)
 		if n := b.Node(id); n != nil {
 			n.Health = worseHealth(n.Health, nrHealth(e.AlertSeverity, e.Reporting))
 		}

@@ -175,9 +175,11 @@ func (h *ServiceMapHandler) Build(parent context.Context, userID string, req Ser
 				ps.OK, ps.Notes = false, []string{"prometheus_not_found"}
 			default:
 				ps.Notes = append(ps.Notes, "target:"+target)
+				b.SetOrigin("k8s:"+req.K8s, req.Context)
 				if err := apm.MapFromPrometheus(pctx, q, mreq, b, ps, "prometheus"); err != nil {
 					ps.OK, ps.Error = false, err.Error()
 				}
+				b.SetOrigin("", "")
 			}
 			pcancel()
 		}
@@ -196,7 +198,9 @@ func (h *ServiceMapHandler) Build(parent context.Context, userID string, req Ser
 			actx, acancel := context.WithTimeout(ctx, 25*time.Second)
 			r := mreq
 			r.Scope = a.Scope
+			b.SetOrigin(a.ID, firstNonEmpty(a.Scope, conn.Scope))
 			err = cl.Provider.Map(actx, cl, r, b, st)
+			b.SetOrigin("", "")
 			acancel()
 		}
 		if err != nil {

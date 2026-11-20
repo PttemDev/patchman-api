@@ -162,3 +162,44 @@ func (q promQuerier) Query(ctx context.Context, expr string, at time.Time) ([]se
 	}
 	return out, nil
 }
+
+// QueryRange runs a PromQL range query (the detail's charts).
+func (q promQuerier) QueryRange(ctx context.Context, expr string, start, end time.Time, step time.Duration) ([]servicemap.RangeSample, error) {
+	if step < time.Second {
+		step = time.Minute
+	}
+	v := url.Values{"query": {expr}, "start": {strconv.FormatInt(start.Unix(), 10)}, "end": {strconv.FormatInt(end.Unix(), 10)}, "step": {strconv.Itoa(int(step.Seconds()))}}
+	raw, err := q.c.DoRawWith(ctx, http.MethodGet, q.prefix+"/query_range", v, nil, q.headers)
+	if err != nil {
+		return nil, err
+	}
+	var r promResp
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, &APIError{http.StatusBadGateway, "upstream", "the Prometheus API answered with something other than JSON — check the URL"}
+	}
+	if r.Status != "" && r.Status != "success" {
+		return nil, fmt.Errorf("query failed: %s", r.Error)
+	}
+	return parseRangeResult(r), nil
+}
+
+func parseRangeResult(r promResp) []servicemap.RangeSample {
+	out := make([]servicemap.RangeSample, 0, len(r.Data.Result))
+	for _, s := range r.Data.Result {
+		rs := servicemap.RangeSample{Metric: s.Metric}
+		for _, pt := range s.Values {
+			if len(pt) != 2 {
+				continue
+			}
+			ts, ok := pt[0].(float64)
+			str, _ := pt[1].(string)
+			f, err := strconv.ParseFloat(str, 64)
+			if !ok || err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+				continue
+			}
+			rs.Points = append(rs.Points, [2]float64{ts * 1000, f})
+		}
+		out = append(out, rs)
+	}
+	return out
+}

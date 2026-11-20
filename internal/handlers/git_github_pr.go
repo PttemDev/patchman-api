@@ -1141,7 +1141,7 @@ func (h *GitRemoteHandler) ghMergeMR(c *gin.Context, userID string, conn *models
 	}
 	detail := gin.H{"project": project, "iid": iid, "squash": in.Squash, "auto": in.MergeWhenPipelineSucceeds}
 	title, msg := "", ""
-	if m := strings.TrimSpace(in.SquashCommitMessage); m != "" && in.Squash {
+	if m := in.commitMessage(); m != "" {
 		title, msg, _ = strings.Cut(m, "\n")
 		title, msg = strings.TrimSpace(title), strings.TrimSpace(msg)
 	}

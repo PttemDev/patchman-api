@@ -101,6 +101,20 @@ type Node struct {
 	K8s      *K8sRef    `json:"k8s,omitempty"`
 	Coroot   *CorootRef `json:"coroot,omitempty"`
 	Sources  []string   `json:"sources"`
+	// Refs: how each observability connection knows this node, so the
+	// service detail asks the right connection for the right name (a node
+	// merged into a K8s workload keeps the APM's own service name here).
+	Refs []SourceRef `json:"refs,omitempty"`
+}
+
+// SourceRef is one connection's handle on a node.
+type SourceRef struct {
+	Conn      string `json:"conn"`            // observability connection id, or "k8s:<id>" (cluster Prometheus)
+	Scope     string `json:"scope,omitempty"` // provider scope (New Relic account, Coroot project, K8s context)
+	Source    string `json:"source"`          // newrelic | coroot | prometheus | …
+	Name      string `json:"name"`            // the service name as that backend knows it
+	Namespace string `json:"namespace,omitempty"`
+	Key       string `json:"key,omitempty"` // the backend's own id (New Relic entity guid, Coroot app id)
 }
 
 // Evidence explains an edge. Never a value: names + the extracted address.
@@ -150,6 +164,35 @@ type Builder struct {
 	podIPs map[string]string   // pod IP → workload id
 	svcIPs map[string][]string // ClusterIP → workload ids
 	svcs   map[string][]string // "ns/svc" → node ids
+
+	// The connection whose Map is running (SetOrigin); ServiceNode records
+	// a SourceRef for it.
+	originConn, originScope string
+}
+
+// SetOrigin names the connection whose provider adds nodes next ("" = none).
+func (b *Builder) SetOrigin(conn, scope string) { b.originConn, b.originScope = conn, scope }
+
+// AddRef records how the current origin connection knows node id. A repeat
+// (same connection and name) only fills in a missing key.
+func (b *Builder) AddRef(id, source, name, ns, key string) {
+	if b.originConn == "" || name == "" {
+		return
+	}
+	n := b.nodes[b.resolve(id)]
+	if n == nil {
+		return
+	}
+	for i := range n.Refs {
+		r := &n.Refs[i]
+		if r.Conn == b.originConn && r.Name == name && r.Namespace == ns {
+			if r.Key == "" {
+				r.Key = key
+			}
+			return
+		}
+	}
+	n.Refs = append(n.Refs, SourceRef{Conn: b.originConn, Scope: b.originScope, Source: source, Name: name, Namespace: ns, Key: key})
 }
 
 func NewBuilder() *Builder {
@@ -168,6 +211,7 @@ func (b *Builder) ServiceNode(ns, name, source string) string {
 	}
 	key := ns + "/" + name
 	if id, ok := b.named[key]; ok {
+		b.AddRef(id, source, name, ns, "")
 		return id
 	}
 	var found string
@@ -207,6 +251,7 @@ func (b *Builder) ServiceNode(ns, name, source string) string {
 		b.Upsert(&Node{ID: found, Kind: KindService, Subtype: "http", Namespace: ns, Name: name}, source)
 	}
 	b.named[key] = found
+	b.AddRef(found, source, name, ns, "")
 	return found
 }
 

@@ -1177,10 +1177,12 @@ func main() {
 			api.POST("/observability-connections/:id/newrelic/nrql", obsConnH.NewRelicNRQL)
 			api.GET("/observability-connections/:id/newrelic/entities", obsConnH.NewRelicEntities)
 			api.GET("/observability-connections/:id/newrelic/alerts", obsConnH.NewRelicAlerts)
+			api.GET("/observability-connections/:id/service-detail", obsConnH.ServiceDetail)
 			api.GET("/observability-connections/:id/grants", obsConnH.ListGrants)
 			api.POST("/observability-connections/:id/grants", obsConnH.AddGrant)
 			api.DELETE("/observability-connections/:id/grants/:grantId", obsConnH.DeleteGrant)
 			api.GET("/service-map", serviceMapH.Get)
+			api.GET("/service-map/service-detail", serviceMapH.ServiceDetail)
 
 			// Git tools (v1) — see GIT_V1_CONTRACT.md. Connection CRUD +
 			// delegated grants ride the same encrypted-secret spine as the

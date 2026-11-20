@@ -328,6 +328,9 @@ func applyCorootMap(b *servicemap.Builder, project string, apps []corootApp) []c
 		}
 		got := b.Upsert(n, "coroot")
 		ids[a.ID] = got.ID
+		if !external {
+			b.AddRef(got.ID, "coroot", name, ns, a.ID)
+		}
 		// The node-agent metrics address external services by IP:port.
 		if external {
 			port := ""
@@ -386,6 +389,7 @@ func applyCorootApps(b *servicemap.Builder, project string, apps []struct {
 				Health: corootHealth(a.Status), Category: a.Category, Coroot: &servicemap.CorootRef{Project: project, AppID: a.ID},
 				K8s: &servicemap.K8sRef{Kind: kind, Namespace: ns, Name: name}}, "coroot")
 		}
+		b.AddRef(n.ID, "coroot", name, ns, a.ID)
 		if n.Replicas == "" && strings.Contains(a.Instances.Value, "/") {
 			n.Replicas = a.Instances.Value
 		}
