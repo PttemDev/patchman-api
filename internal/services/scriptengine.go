@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/dop251/goja"
 )
+
+var varRef = regexp.MustCompile(`\{\{[\w.-]+\}\}`)
 
 // ScriptEngine executes JavaScript scripts in a sandboxed goja runtime,
 // providing a Postman-compatible pm.* API for pre-request and test scripts.
@@ -30,6 +33,12 @@ type ScriptContext struct {
 
 	// Environment variables (can be read/written)
 	EnvVars map[string]string `json:"envVars"`
+
+	// Header changes a pre-request script made (pm.request.headers.add /
+	// upsert / set / remove), so the caller applies just those on top of the
+	// request it builds after the script — not a stale copy of every header.
+	SetHeaders     map[string]string `json:"setHeaders"`
+	RemovedHeaders []string          `json:"removedHeaders"`
 
 	// Console output captured from console.log
 	ConsoleOutput []string `json:"consoleOutput"`
@@ -68,8 +77,14 @@ func (e *ScriptEngine) Execute(script string, ctx *ScriptContext) error {
 	if ctx.EnvVars == nil {
 		ctx.EnvVars = make(map[string]string)
 	}
+	if ctx.SetHeaders == nil {
+		ctx.SetHeaders = make(map[string]string)
+	}
 
 	vm := goja.New()
+	if err := installCrypto(vm); err != nil {
+		return fmt.Errorf("failed to setup CryptoJS: %w", err)
+	}
 
 	// Impose a 10-second execution timeout to prevent infinite loops.
 	timer := time.AfterFunc(10*time.Second, func() {
@@ -147,10 +162,29 @@ func (e *ScriptEngine) Execute(script string, ctx *ScriptContext) error {
 		_, ok := ctx.EnvVars[key]
 		return vm.ToValue(ok)
 	})
+	// replaceIn("{{a}}/x") → the text with known variables filled in.
+	_ = envObj.Set("replaceIn", func(call goja.FunctionCall) goja.Value {
+		return vm.ToValue(varRef.ReplaceAllStringFunc(call.Argument(0).String(), func(m string) string {
+			if v, ok := ctx.EnvVars[m[2:len(m)-2]]; ok {
+				return v
+			}
+			return m
+		}))
+	})
+	_ = envObj.Set("toObject", func(call goja.FunctionCall) goja.Value {
+		out := make(map[string]any, len(ctx.EnvVars))
+		for k, v := range ctx.EnvVars {
+			out[k] = v
+		}
+		return vm.ToValue(out)
+	})
 	_ = pmObj.Set("environment", envObj)
 
-	// --- pm.variables (aliases pm.environment for now) ---
+	// pm.variables / pm.collectionVariables / pm.globals share the active
+	// environment: PatchMan has one variable scope per request.
 	_ = pmObj.Set("variables", envObj)
+	_ = pmObj.Set("collectionVariables", envObj)
+	_ = pmObj.Set("globals", envObj)
 
 	// --- pm.test ---
 	_ = pmObj.Set("test", func(call goja.FunctionCall) goja.Value {
@@ -207,42 +241,98 @@ func (e *ScriptEngine) setupRequest(vm *goja.Runtime, pmObj *goja.Object, ctx *S
 	_ = reqObj.Set("url", ctx.URL)
 	_ = reqObj.Set("body", ctx.Body)
 
-	// pm.request.headers as an object with get/set helpers
+	// pm.request.headers — Postman's HeaderList surface: get / has / add /
+	// upsert / set / remove / toObject. Changes are also recorded in
+	// SetHeaders / RemovedHeaders for the caller.
 	headersObj := vm.NewObject()
-	_ = headersObj.Set("get", func(call goja.FunctionCall) goja.Value {
-		key := call.Argument(0).String()
-		// Case-insensitive header lookup
-		for k, v := range ctx.Headers {
+	findKey := func(key string) (string, bool) {
+		for k := range ctx.Headers {
 			if strings.EqualFold(k, key) {
-				return vm.ToValue(v)
+				return k, true
 			}
 		}
-		return goja.Undefined()
-	})
-	_ = headersObj.Set("set", func(call goja.FunctionCall) goja.Value {
-		key := call.Argument(0).String()
-		val := call.Argument(1).String()
+		return "", false
+	}
+	setHeader := func(key, val string) {
+		if key == "" {
+			return
+		}
+		if old, ok := findKey(key); ok {
+			delete(ctx.Headers, old)
+		}
+		for old := range ctx.SetHeaders {
+			if strings.EqualFold(old, key) {
+				delete(ctx.SetHeaders, old)
+			}
+		}
 		ctx.Headers[key] = val
+		ctx.SetHeaders[key] = val
+		kept := ctx.RemovedHeaders[:0]
+		for _, r := range ctx.RemovedHeaders {
+			if !strings.EqualFold(r, key) {
+				kept = append(kept, r)
+			}
+		}
+		ctx.RemovedHeaders = kept
+	}
+	// headerArgs accepts ({key, value}) or (key, value) or ("Key: value").
+	headerArgs := func(call goja.FunctionCall) (string, string) {
+		arg := call.Argument(0)
+		if obj, ok := arg.Export().(map[string]any); ok {
+			k, _ := obj["key"].(string)
+			v := ""
+			if raw, ok := obj["value"]; ok && raw != nil {
+				v = fmt.Sprint(raw)
+			}
+			return k, v
+		}
+		key := arg.String()
+		if len(call.Arguments) < 2 {
+			if k, v, ok := strings.Cut(key, ":"); ok {
+				return strings.TrimSpace(k), strings.TrimSpace(v)
+			}
+		}
+		return key, call.Argument(1).String()
+	}
+	_ = headersObj.Set("get", func(call goja.FunctionCall) goja.Value {
+		if k, ok := findKey(call.Argument(0).String()); ok {
+			return vm.ToValue(ctx.Headers[k])
+		}
 		return goja.Undefined()
 	})
 	_ = headersObj.Set("has", func(call goja.FunctionCall) goja.Value {
-		key := call.Argument(0).String()
-		for k := range ctx.Headers {
-			if strings.EqualFold(k, key) {
-				return vm.ToValue(true)
-			}
-		}
-		return vm.ToValue(false)
+		_, ok := findKey(call.Argument(0).String())
+		return vm.ToValue(ok)
 	})
+	for _, name := range []string{"add", "upsert", "set"} {
+		_ = headersObj.Set(name, func(call goja.FunctionCall) goja.Value {
+			k, v := headerArgs(call)
+			setHeader(k, v)
+			return goja.Undefined()
+		})
+	}
 	_ = headersObj.Set("remove", func(call goja.FunctionCall) goja.Value {
 		key := call.Argument(0).String()
-		for k := range ctx.Headers {
+		if obj, ok := call.Argument(0).Export().(map[string]any); ok {
+			key, _ = obj["key"].(string)
+		}
+		if k, ok := findKey(key); ok {
+			delete(ctx.Headers, k)
+		}
+		for k := range ctx.SetHeaders {
 			if strings.EqualFold(k, key) {
-				delete(ctx.Headers, k)
-				break
+				delete(ctx.SetHeaders, k)
 			}
 		}
+		ctx.RemovedHeaders = append(ctx.RemovedHeaders, key)
 		return goja.Undefined()
+	})
+	_ = headersObj.Set("toObject", func(call goja.FunctionCall) goja.Value {
+		out := make(map[string]any, len(ctx.Headers))
+		for k, v := range ctx.Headers {
+			out[k] = v
+		}
+		return vm.ToValue(out)
 	})
 	// Also expose raw header entries for iteration
 	for k, v := range ctx.Headers {

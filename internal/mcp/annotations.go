@@ -62,6 +62,7 @@ var toolKinds = map[string]toolKind{
 	"list_redis_connections": readLocal, "list_kafka_connections": readLocal, "list_s3_connections": readLocal,
 	"list_k8s_connections": readLocal, "list_grafana_connections": readLocal, "list_rabbitmq_connections": readLocal,
 	"list_graylog_connections": readLocal, "list_observability_connections": readLocal,
+	"list_jira_connections": readLocal,
 	// Execution against connections
 	"send_http_request": writeRemote, "dns_lookup": readRemote,
 	"run_db_query": writeRemote, // read-only unless allowWrite on a read-write connection
@@ -81,6 +82,16 @@ var toolKinds = map[string]toolKind{
 	"grafana_dashboards": readRemote, "grafana_dashboard": readRemote, "grafana_datasources": readRemote,
 	"grafana_panel_data": readRemote, "grafana_query": readRemote,
 	"graylog_streams": readRemote, "graylog_search": readRemote, "graylog_dashboards": readRemote,
+	"jira_search": readRemote, "jira_issue": readRemote,
+	"qa_radar":        readRemote,
+	"qa_review_queue": readRemote, "qa_mr_context": addRemote, // reads remote; claim=true records a claim
+	"qa_submit_review":  updateLocal, // replaces the draft
+	"qa_verify_context": addRemote, "qa_submit_verification": updateLocal,
+	"qa_setup": readLocal, "jira_projects": readRemote,
+	"qa_link_save": updateLocal, "qa_link_delete": deleteLocal, "qa_link_my_connection": updateLocal,
+	"qa_settings_save": updateLocal, "qa_schedule_save": updateLocal, "qa_schedule_delete": deleteLocal,
+	"qa_channel_save": updateLocal, "qa_channel_delete": deleteLocal,
+	"qa_webhook_setup": addRemote, "jira_connection_create": createLocal,
 	"service_map": readRemote, "service_detail": readRemote, "newrelic_nrql": readRemote, "newrelic_entities": readRemote, "newrelic_alerts": readRemote,
 	// Git (GitLab)
 	"git_repos": readRemote, "git_file": readRemote,

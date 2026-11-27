@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -235,6 +236,9 @@ func (h *GitRemoteHandler) Repos(c *gin.Context) {
 	q.Set("order_by", "last_activity_at")
 	if s := strings.TrimSpace(c.Query("search")); s != "" {
 		q.Set("search", s)
+		// Match the group path too ("oms" finds oms-team/*), not only the
+		// project name.
+		q.Set("search_namespaces", "true")
 	}
 	var raw []struct {
 		ID                int64  `json:"id"`
@@ -668,34 +672,13 @@ func (h *GitRemoteHandler) MergeRequest(c *gin.Context) {
 		h.ghMergeRequest(c, userID, conn, token, project, iid)
 		return
 	}
-	var raw struct {
-		IID          int64      `json:"iid"`
-		Title        string     `json:"title"`
-		Description  string     `json:"description"`
-		State        string     `json:"state"`
-		SourceBranch string     `json:"source_branch"`
-		TargetBranch string     `json:"target_branch"`
-		WebURL       string     `json:"web_url"`
-		CreatedAt    string     `json:"created_at"`
-		UpdatedAt    string     `json:"updated_at"`
-		Draft        bool       `json:"draft"`
-		MergeStatus  string     `json:"merge_status"`
-		HasConflicts bool       `json:"has_conflicts"`
-		SHA          string     `json:"sha"`
-		Author       struct{ Name string `json:"name"` } `json:"author"`
-		DiffRefs     glDiffRefs `json:"diff_refs"`
-	}
+	var raw glMRDetail
 	if _, ok := h.getJSON(c, token, projectPath(project)+"/merge_requests/"+iid, nil, &raw); !ok {
 		return
 	}
+	me := h.glUsername(c, token)
 	h.conns.audit(userID, conn.ID, "merge_request", true, gin.H{"project": project, "iid": iid})
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{
-		"iid": raw.IID, "title": raw.Title, "description": raw.Description, "state": raw.State,
-		"sourceBranch": raw.SourceBranch, "targetBranch": raw.TargetBranch, "author": raw.Author.Name,
-		"webUrl": raw.WebURL, "createdAt": raw.CreatedAt, "updatedAt": raw.UpdatedAt,
-		"draft": raw.Draft, "mergeStatus": raw.MergeStatus, "hasConflicts": raw.HasConflicts,
-		"sha": raw.SHA, "diffRefs": raw.DiffRefs.toDTO(),
-	}})
+	c.JSON(http.StatusOK, gin.H{"data": raw.dto(me)})
 }
 
 // MergeRequestChanges returns an MR's per-file diffs + diff_refs (read). This is
@@ -885,28 +868,81 @@ func (h *GitRemoteHandler) auth(c *gin.Context) (userID string, conn *models.Git
 // back to the caller's linked GitLab OAuth account. h.conns is in the same
 // package, so its cipher decrypts the stored PAT here.
 func (h *GitRemoteHandler) connToken(c *gin.Context, conn *models.GitConnection, userID string) (string, bool) {
+	tok, base, err := h.credsFor(conn, userID)
+	if err != nil {
+		c.JSON(http.StatusPreconditionFailed, gin.H{"error": err.Error()})
+		return "", false
+	}
+	if base != "" {
+		c.Set(gitlabAPIBaseKey, base)
+	}
+	return tok, true
+}
+
+// errGitHubNoToken / errLinkGitLab are credsFor's precondition failures.
+var (
+	errGitHubNoToken = errors.New("This GitHub connection has no access token — edit it and add a personal access token.")
+	errLinkGitLab    = errors.New(gitLinkGitLabMsg)
+)
+
+// credsFor resolves the token for a remote call without touching a request:
+// the connection's own PAT, else the caller's linked GitLab OAuth account.
+// base is the GitLab REST root the token belongs to ("" = the configured
+// instance; always "" for GitHub, whose base comes from ghBase). Used by
+// connToken and by fan-out callers (the QA radar) that must not write a
+// response per failure.
+func (h *GitRemoteHandler) credsFor(conn *models.GitConnection, userID string) (token, base string, err error) {
 	if isGitHub(conn) {
 		// GitHub connections carry their own token (no "link your GitHub
 		// account" flow yet).
 		if conn.CredentialEnc != "" {
-			if pat, err := h.conns.cipher.Decrypt(conn.CredentialEnc); err == nil && strings.TrimSpace(pat) != "" {
-				return strings.TrimSpace(pat), true
+			if pat, derr := h.conns.cipher.Decrypt(conn.CredentialEnc); derr == nil && strings.TrimSpace(pat) != "" {
+				return strings.TrimSpace(pat), "", nil
 			}
 		}
-		c.JSON(http.StatusPreconditionFailed, gin.H{"error": "This GitHub connection has no access token — edit it and add a personal access token."})
-		return "", false
+		return "", "", errGitHubNoToken
+	}
+	if strings.EqualFold(strings.TrimSpace(conn.AuthKind), "pat") && conn.CredentialEnc != "" {
+		if pat, derr := h.conns.cipher.Decrypt(conn.CredentialEnc); derr == nil && strings.TrimSpace(pat) != "" {
+			// The PAT belongs to the connection's GitLab, which need not be
+			// the configured one (another company's instance, say).
+			if b := strings.TrimRight(strings.TrimSpace(conn.BaseURL), "/"); b != "" {
+				base = b + "/api/v4"
+			}
+			return strings.TrimSpace(pat), base, nil
+		}
+	}
+	if h.integ == nil {
+		return "", "", errLinkGitLab
+	}
+	tok, terr := h.integ.validAccessToken(userID)
+	if terr != nil || strings.TrimSpace(tok) == "" {
+		return "", "", errLinkGitLab
+	}
+	return tok, "", nil
+}
+
+// usesStoredCredential: credsFor answers with the connection's own stored
+// token (GitHub, or a GitLab PAT that decrypts) rather than the caller's
+// linked account — so the remote identity is the connection owner's.
+func (h *GitRemoteHandler) usesStoredCredential(conn *models.GitConnection) bool {
+	if isGitHub(conn) {
+		return true
 	}
 	if strings.EqualFold(strings.TrimSpace(conn.AuthKind), "pat") && conn.CredentialEnc != "" {
 		if pat, err := h.conns.cipher.Decrypt(conn.CredentialEnc); err == nil && strings.TrimSpace(pat) != "" {
-			// The PAT belongs to the connection's GitLab, which need not be
-			// the configured one (another company's instance, say).
-			if base := strings.TrimRight(strings.TrimSpace(conn.BaseURL), "/"); base != "" {
-				c.Set(gitlabAPIBaseKey, base+"/api/v4")
-			}
-			return strings.TrimSpace(pat), true
+			return true
 		}
 	}
-	return h.tokenOr412(c, userID)
+	return false
+}
+
+// glBase is the GitLab REST root for a credsFor base ("" = configured).
+func (h *GitRemoteHandler) glBase(base string) string {
+	if base != "" {
+		return base
+	}
+	return strings.TrimRight(h.cfg.GitLabBaseURL, "/") + "/api/v4"
 }
 
 // tokenOr412 returns the caller's valid GitLab access token, or writes the exact
@@ -989,7 +1025,12 @@ func (h *GitRemoteHandler) gitlabDo(c *gin.Context, token, method, path string, 
 // status. Path is appended verbatim (callers pre-escape project/file segments,
 // as git_push.go does); query is encoded from url.Values.
 func (h *GitRemoteHandler) gitlabGET(c *gin.Context, token, path string, q url.Values) ([]byte, http.Header, int, error) {
-	endpoint := h.apiBase(c) + path
+	return h.glGET(h.apiBase(c), token, path, q)
+}
+
+// glGET is gitlabGET against an explicit REST root (no request needed).
+func (h *GitRemoteHandler) glGET(base, token, path string, q url.Values) ([]byte, http.Header, int, error) {
+	endpoint := base + path
 	if len(q) > 0 {
 		endpoint += "?" + q.Encode()
 	}

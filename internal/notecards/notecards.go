@@ -590,3 +590,34 @@ func ProjectKey(name string) string {
 	}
 	return k
 }
+
+// Redact replaces credential-looking text with "[REDACTED:<kind>]" and
+// returns how many it replaced. Used on everything the CR + QA Hub hands to
+// an agent (MR diffs, descriptions, commit messages, Jira text): the
+// patterns are SecretKind's, applied as replacements.
+func Redact(text string) (string, int) {
+	n := 0
+	for _, p := range secretPatterns {
+		text = p.re.ReplaceAllStringFunc(text, func(string) string {
+			n++
+			return "[REDACTED:" + p.kind + "]"
+		})
+	}
+	text = keyValueRE.ReplaceAllStringFunc(text, func(m string) string {
+		sub := keyValueRE.FindStringSubmatch(m)
+		if len(sub) < 3 || !secretValue(sub[2]) {
+			return m
+		}
+		n++
+		return strings.Replace(m, sub[2], "[REDACTED:password or key]", 1)
+	})
+	text = urlCredRE.ReplaceAllStringFunc(text, func(m string) string {
+		sub := urlCredRE.FindStringSubmatch(m)
+		if len(sub) < 2 || !secretValue(sub[1]) {
+			return m
+		}
+		n++
+		return strings.Replace(m, ":"+sub[1]+"@", ":[REDACTED]@", 1)
+	})
+	return text, n
+}

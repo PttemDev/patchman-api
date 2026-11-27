@@ -83,7 +83,11 @@ func (h *SharedStepHandler) List(c *gin.Context) {
 	userID := c.GetString("userID")
 
 	var steps []models.SharedStep
-	if err := h.db.Where("user_id = ?", userID).Order("created_at DESC").Find(&steps).Error; err != nil {
+	scope, ok := qaListScope(h.db, c, userID)
+	if !ok {
+		return
+	}
+	if err := scope.Order("created_at DESC").Find(&steps).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch shared steps"})
 		return
 	}
@@ -106,9 +110,14 @@ func (h *SharedStepHandler) Create(c *gin.Context) {
 		return
 	}
 
+	ws, ok := qaCreateWorkspace(h.db, c, userID)
+	if !ok {
+		return
+	}
 	step := models.SharedStep{
-		ID:     newID,
-		UserID: userID,
+		ID:          newID,
+		UserID:      userID,
+		WorkspaceID: ws,
 		Title:  input.Title,
 		Steps:  stepsRawToString(input.Steps),
 	}
@@ -126,8 +135,7 @@ func (h *SharedStepHandler) Get(c *gin.Context) {
 	id := c.Param("id")
 
 	var step models.SharedStep
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&step).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Shared step not found"})
+	if !qaLoad(h.db, c, userID, id, &step, ViewerRole, "Shared step not found") {
 		return
 	}
 
@@ -139,8 +147,7 @@ func (h *SharedStepHandler) Update(c *gin.Context) {
 	id := c.Param("id")
 
 	var step models.SharedStep
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&step).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Shared step not found"})
+	if !qaLoad(h.db, c, userID, id, &step, EditorRole, "Shared step not found") {
 		return
 	}
 
@@ -172,8 +179,7 @@ func (h *SharedStepHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 
 	var step models.SharedStep
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&step).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Shared step not found"})
+	if !qaLoad(h.db, c, userID, id, &step, OwnerRole, "Shared step not found") {
 		return
 	}
 
@@ -190,8 +196,7 @@ func (h *SharedStepHandler) IncrementUsage(c *gin.Context) {
 	id := c.Param("id")
 
 	var step models.SharedStep
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&step).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Shared step not found"})
+	if !qaLoad(h.db, c, userID, id, &step, EditorRole, "Shared step not found") {
 		return
 	}
 
@@ -209,8 +214,7 @@ func (h *SharedStepHandler) DecrementUsage(c *gin.Context) {
 	id := c.Param("id")
 
 	var step models.SharedStep
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&step).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Shared step not found"})
+	if !qaLoad(h.db, c, userID, id, &step, EditorRole, "Shared step not found") {
 		return
 	}
 

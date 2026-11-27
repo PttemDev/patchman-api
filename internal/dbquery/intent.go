@@ -18,6 +18,11 @@ func ValidateReadOnly(kind, q string) error {
 		}
 		return fmt.Errorf("only read-only SQL statements are accepted — SELECT, WITH, EXPLAIN (EXPLAIN ANALYZE only of a read), SHOW, DESCRIBE")
 	case "mongo":
+		// A mongosh script runs in the JavaScript engine (mongo_shell.go), which
+		// refuses every write at run time unless the caller may write.
+		if IsMongoJSScript(q) {
+			return nil
+		}
 		return ValidateReadOnlyMongo(q)
 	}
 	return fmt.Errorf("unknown driver kind: %s", kind)
@@ -62,6 +67,10 @@ func IsWriteStatement(kind, q string) bool {
 		// "not provably read-only" is exactly "treat as a write".
 		return !IsReadOnlySQL(q)
 	case "mongo":
+		// Scripts are checked call by call while they run (mongo_shell.go).
+		if IsMongoJSScript(q) {
+			return false
+		}
 		return isWriteMongo(q)
 	}
 	return false

@@ -514,9 +514,14 @@ func (h *LoadTestHandler) Create(c *gin.Context) {
 	configJSON, _ := json.Marshal(cfg)
 
 	now := time.Now()
+	ws, ok := qaCreateWorkspace(h.db, c, userID)
+	if !ok {
+		return
+	}
 	lt := models.LoadTest{
 		ID:          uuid.New().String(),
 		UserID:      userID,
+		WorkspaceID: ws,
 		Name:        input.Name,
 		Description: input.Description,
 		Status:      "running",
@@ -549,7 +554,11 @@ func (h *LoadTestHandler) List(c *gin.Context) {
 	userID := c.GetString("userID")
 
 	var tests []models.LoadTest
-	if err := h.db.Where("user_id = ?", userID).Order("created_at DESC").Find(&tests).Error; err != nil {
+	scope, ok := qaListScope(h.db, c, userID)
+	if !ok {
+		return
+	}
+	if err := scope.Order("created_at DESC").Find(&tests).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list load tests"})
 		return
 	}
@@ -566,8 +575,7 @@ func (h *LoadTestHandler) Get(c *gin.Context) {
 	id := c.Param("id")
 
 	var lt models.LoadTest
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&lt).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Load test not found"})
+	if !qaLoad(h.db, c, userID, id, &lt, ViewerRole, "Load test not found") {
 		return
 	}
 
@@ -583,8 +591,7 @@ func (h *LoadTestHandler) LiveResults(c *gin.Context) {
 	id := c.Param("id")
 
 	var lt models.LoadTest
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&lt).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Load test not found"})
+	if !qaLoad(h.db, c, userID, id, &lt, EditorRole, "Load test not found") {
 		return
 	}
 
@@ -659,8 +666,7 @@ func (h *LoadTestHandler) Cancel(c *gin.Context) {
 	id := c.Param("id")
 
 	var lt models.LoadTest
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&lt).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Load test not found"})
+	if !qaLoad(h.db, c, userID, id, &lt, EditorRole, "Load test not found") {
 		return
 	}
 
@@ -689,8 +695,7 @@ func (h *LoadTestHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 
 	var lt models.LoadTest
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&lt).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Load test not found"})
+	if !qaLoad(h.db, c, userID, id, &lt, OwnerRole, "Load test not found") {
 		return
 	}
 

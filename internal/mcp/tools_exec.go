@@ -59,6 +59,7 @@ func registerConnectionDiscoveryTools(s *mcpsdk.Server, c *caller) {
 	list("list_grafana_connections", "/api/grafana-connections", "Grafana")
 	list("list_rabbitmq_connections", "/api/rabbit-connections", "RabbitMQ")
 	list("list_graylog_connections", "/api/graylog-connections", "Graylog")
+	list("list_jira_connections", "/api/jira-connections", "Jira")
 	list("list_observability_connections", "/api/observability-connections", "observability (APM: Coroot, Prometheus, Jaeger, Kiali, SigNoz, Datadog)")
 }
 
@@ -110,7 +111,7 @@ type runDBQueryIn struct {
 
 func registerDBExecTools(s *mcpsdk.Server, c *caller) {
 	regCtx(s, "run_db_query",
-		"Run a query against a saved DB connection (Postgres/MySQL/SQL Server/Mongo/BigQuery). Read-only by default; a write runs only with allowWrite=true on a connection whose owner enabled read-write (list_db_connections shows allowWrite), and only for its owner or a co-owner. Mongo: updateMany/deleteMany refuse an empty filter. BigQuery: every query is dry-run first; one over the user's scan limit is refused, one over their ask threshold returns costConfirm with the size."+connNote,
+		"Run a query against a saved DB connection (Postgres/MySQL/SQL Server/Mongo/BigQuery). Read-only by default; a write runs only with allowWrite=true on a connection whose owner enabled read-write (list_db_connections shows allowWrite), and only for its owner or a co-owner. Mongo: updateMany/deleteMany refuse an empty filter; a mongosh script (JavaScript: use <db>, variables, print, forEach, toArray, ?. / ??…) runs in a sandbox; each top-level expression's value and the print output come back as results, and every write call needs allowWrite on a read-write connection. BigQuery: every query is dry-run first; one over the user's scan limit is refused, one over their ask threshold returns costConfirm with the size."+connNote,
 		func(ctx context.Context, in runDBQueryIn) (int, string) {
 			return c.callCtx(ctx, "POST", "/api/db-query/execute", in)
 		})
@@ -355,7 +356,7 @@ type s3GetObjectIn struct {
 }
 
 func registerS3Tools(s *mcpsdk.Server, c *caller) {
-	regCtx(s, "s3_list_buckets", "List S3 buckets. Read-only."+connNote,
+	regCtx(s, "s3_list_buckets", "List S3 buckets. A connection limited to one bucket returns just that bucket with the path (prefix) it may use — list objects under that prefix. Read-only."+connNote,
 		func(ctx context.Context, in s3IDIn) (int, string) {
 			return c.callCtx(ctx, "GET", "/api/s3/"+url.PathEscape(in.ID)+"/buckets", nil)
 		})

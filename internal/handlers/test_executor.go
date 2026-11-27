@@ -26,14 +26,14 @@ import (
 // ---------------------------------------------------------------------------
 
 type executableStep struct {
-	StepNo      int               `json:"stepNo"`
-	Type        string            `json:"type"` // request | assertion | extract | wait
-	Action      string            `json:"action"`
-	Expected    string            `json:"expected"`
-	Request     *stepRequest      `json:"request,omitempty"`
-	Assertions  []stepAssertion   `json:"assertions,omitempty"`
-	Extractions []stepExtraction  `json:"extractions,omitempty"`
-	WaitMs      int               `json:"waitMs,omitempty"`
+	StepNo      int              `json:"stepNo"`
+	Type        string           `json:"type"` // request | assertion | extract | wait
+	Action      string           `json:"action"`
+	Expected    string           `json:"expected"`
+	Request     *stepRequest     `json:"request,omitempty"`
+	Assertions  []stepAssertion  `json:"assertions,omitempty"`
+	Extractions []stepExtraction `json:"extractions,omitempty"`
+	WaitMs      int              `json:"waitMs,omitempty"`
 }
 
 type stepRequest struct {
@@ -44,11 +44,11 @@ type stepRequest struct {
 }
 
 type stepAssertion struct {
-	Type     string `json:"type"`               // status | body_contains | json_path | response_time | header
-	Operator string `json:"operator"`           // equals | not_equals | contains | not_contains | exists | not_empty | greater_than | less_than | matches
+	Type     string `json:"type"`     // status | body_contains | json_path | response_time | header
+	Operator string `json:"operator"` // equals | not_equals | contains | not_contains | exists | not_empty | greater_than | less_than | matches
 	Value    string `json:"value,omitempty"`
-	Path     string `json:"path,omitempty"`     // for json_path
-	Key      string `json:"key,omitempty"`      // for header
+	Path     string `json:"path,omitempty"` // for json_path
+	Key      string `json:"key,omitempty"`  // for header
 }
 
 type stepExtraction struct {
@@ -138,8 +138,7 @@ func (h *TestExecutorHandler) ExecuteTestCase(c *gin.Context) {
 	id := c.Param("id")
 
 	var tc models.TestCase
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&tc).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test case not found"})
+	if !qaLoad(h.db, c, userID, id, &tc, EditorRole, "Test case not found") {
 		return
 	}
 
@@ -166,8 +165,7 @@ func (h *TestExecutorHandler) ExecuteTestPlan(c *gin.Context) {
 	planID := c.Param("id")
 
 	var plan models.TestPlan
-	if err := h.db.Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test plan not found"})
+	if !qaLoad(h.db, c, userID, planID, &plan, EditorRole, "Test plan not found") {
 		return
 	}
 
@@ -203,6 +201,7 @@ func (h *TestExecutorHandler) ExecuteTestPlan(c *gin.Context) {
 		ID:          uuid.New().String(),
 		TestPlanID:  planID,
 		UserID:      userID,
+		WorkspaceID: plan.WorkspaceID,
 		Environment: input.EnvironmentID,
 		Status:      "running",
 		Results:     "[]",
@@ -234,7 +233,7 @@ func (h *TestExecutorHandler) ExecuteTestPlan(c *gin.Context) {
 
 	for _, tcID := range testCaseIDs {
 		var tc models.TestCase
-		if err := h.db.Where("id = ? AND user_id = ?", tcID, userID).First(&tc).Error; err != nil {
+		if err := qaSameScope(h.db, plan).Where("id = ?", tcID).First(&tc).Error; err != nil {
 			tcResults = append(tcResults, testCaseResult{
 				TestCaseID: tcID,
 				Title:      "",
@@ -288,8 +287,8 @@ func (h *TestExecutorHandler) ExecuteTestPlan(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"data": gin.H{
-			"testRun":      serializeTestRun(run),
-			"testCases":    tcResults,
+			"testRun":       serializeTestRun(run),
+			"testCases":     tcResults,
 			"overallStatus": overallStatus,
 			"totalDuration": totalDuration,
 		},

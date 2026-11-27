@@ -18,7 +18,7 @@ import (
 // Test-case folders: a per-user tree (ParentID, NULL = top level) that the
 // QA "Cases" list groups test cases into. Access mirrors test cases exactly —
 // a folder is visible to, and changeable by, its owner only (test cases have
-// no workspace/sharing layer). Every query below is user_id-scoped, so a
+// workspace sharing via qa_access.go). Queries are scoped by owner or workspace, so a
 // foreign id behaves like a missing one (404), never a 403 that would leak
 // its existence.
 
@@ -74,16 +74,28 @@ func emptyToNil(p *string) *string {
 	return &v
 }
 
-// ownedFolder loads a folder the user owns.
+// ownedFolder loads a folder the user may edit (its owner, or an editor of
+// the workspace it is shared with — qa_access.go).
 func ownedFolder(db *gorm.DB, userID, id string) (models.TestCaseFolder, bool) {
 	var f models.TestCaseFolder
 	if id == "" {
 		return f, false
 	}
-	if err := db.Where("id = ? AND user_id = ?", id, userID).First(&f).Error; err != nil {
+	if err := db.Where("id = ?", id).First(&f).Error; err != nil {
 		return f, false
 	}
-	return f, true
+	return f, qaRowRole(db, userID, f).AtLeast(EditorRole)
+}
+
+// sameQAScope: two QA rows live in the same place (one workspace, or one
+// owner's personal rows) — a case can't be filed in another scope's folder.
+func sameQAScope(a, b qaOwned) bool {
+	ao, aw := a.QAOwner()
+	bo, bw := b.QAOwner()
+	if aw != nil && *aw != "" || bw != nil && *bw != "" {
+		return aw != nil && bw != nil && *aw == *bw
+	}
+	return ao == bo
 }
 
 // nullableUpdate is the value for an Update of a nullable string column: a
@@ -100,7 +112,11 @@ func nullableUpdate(p *string) interface{} {
 func (h *TestCaseFolderHandler) List(c *gin.Context) {
 	userID := c.GetString("userID")
 	var folders []models.TestCaseFolder
-	if err := h.db.Where("user_id = ?", userID).Order("name ASC, created_at ASC").Find(&folders).Error; err != nil {
+	scope, ok := qaListScope(h.db, c, userID)
+	if !ok {
+		return
+	}
+	if err := scope.Order("name ASC, created_at ASC").Find(&folders).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch test folders"})
 		return
 	}
@@ -121,8 +137,13 @@ func (h *TestCaseFolderHandler) Create(c *gin.Context) {
 		return
 	}
 	parentID := emptyToNil(input.ParentID)
+	ws, ok := qaCreateWorkspace(h.db, c, userID)
+	if !ok {
+		return
+	}
 	if parentID != nil {
-		if _, ok := ownedFolder(h.db, userID, *parentID); !ok {
+		parent, ok := ownedFolder(h.db, userID, *parentID)
+		if !ok || !sameQAScope(parent, models.TestCaseFolder{UserID: userID, WorkspaceID: ws}) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Parent folder not found"})
 			return
 		}
@@ -132,7 +153,7 @@ func (h *TestCaseFolderHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id format"})
 		return
 	}
-	f := models.TestCaseFolder{ID: newID, UserID: userID, ParentID: parentID, Name: name}
+	f := models.TestCaseFolder{ID: newID, UserID: userID, WorkspaceID: ws, ParentID: parentID, Name: name}
 	if err := h.db.Create(&f).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create test folder"})
 		return
@@ -179,11 +200,15 @@ func (h *TestCaseFolderHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Folder not found"})
 		return
 	}
+	if !qaRowRole(h.db, userID, f).AtLeast(OwnerRole) {
+		c.JSON(http.StatusForbidden, gin.H{"error": qaForbidden(OwnerRole)})
+		return
+	}
 	moveToParent := c.Query("moveToParent") == "true" || c.Query("moveToParent") == "1"
 
 	var caseCount, folderCount int64
-	h.db.Model(&models.TestCase{}).Where("user_id = ? AND folder_id = ?", userID, f.ID).Count(&caseCount)
-	h.db.Model(&models.TestCaseFolder{}).Where("user_id = ? AND parent_id = ?", userID, f.ID).Count(&folderCount)
+	h.db.Model(&models.TestCase{}).Where("folder_id = ?", f.ID).Count(&caseCount)
+	h.db.Model(&models.TestCaseFolder{}).Where("parent_id = ?", f.ID).Count(&folderCount)
 	if (caseCount > 0 || folderCount > 0) && !moveToParent {
 		c.JSON(http.StatusConflict, gin.H{
 			"error":   "Folder is not empty; pass moveToParent=true to move its contents to the parent folder",
@@ -195,12 +220,12 @@ func (h *TestCaseFolderHandler) Delete(c *gin.Context) {
 
 	err := h.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&models.TestCase{}).
-			Where("user_id = ? AND folder_id = ?", userID, f.ID).
+			Where("folder_id = ?", f.ID).
 			Update("folder_id", nullableUpdate(f.ParentID)).Error; err != nil {
 			return err
 		}
 		if err := tx.Model(&models.TestCaseFolder{}).
-			Where("user_id = ? AND parent_id = ?", userID, f.ID).
+			Where("parent_id = ?", f.ID).
 			Update("parent_id", nullableUpdate(f.ParentID)).Error; err != nil {
 			return err
 		}
@@ -224,8 +249,7 @@ func (h *TestCaseFolderHandler) Delete(c *gin.Context) {
 func (h *TestCaseFolderHandler) MoveTestCase(c *gin.Context) {
 	userID := c.GetString("userID")
 	var tc models.TestCase
-	if err := h.db.Where("id = ? AND user_id = ?", c.Param("id"), userID).First(&tc).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test case not found"})
+	if !qaLoad(h.db, c, userID, c.Param("id"), &tc, EditorRole, "Test case not found") {
 		return
 	}
 	var input moveTestCaseInput
@@ -235,7 +259,7 @@ func (h *TestCaseFolderHandler) MoveTestCase(c *gin.Context) {
 	}
 	target := emptyToNil(input.FolderID)
 	if target != nil {
-		if _, ok := ownedFolder(h.db, userID, *target); !ok {
+		if dst, ok := ownedFolder(h.db, userID, *target); !ok || !sameQAScope(dst, tc) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Folder not found"})
 			return
 		}
@@ -286,9 +310,10 @@ func hasExecutableSteps(stepsJSON string) bool {
 // first (name A→Z, depth-first), then its own cases (newest first, as the
 // list shows them). Folders are loaded once per user and walked in memory, so
 // the same code runs on Postgres and SQLite (no recursive CTE).
-func collectFolderCases(db *gorm.DB, userID, folderID string, recursive bool) (runnable, skipped []models.TestCase, err error) {
+func collectFolderCases(db *gorm.DB, root models.TestCaseFolder, recursive bool) (runnable, skipped []models.TestCase, err error) {
+	folderID := root.ID
 	var folders []models.TestCaseFolder
-	if err = db.Where("user_id = ?", userID).Find(&folders).Error; err != nil {
+	if err = qaSameScope(db, root).Find(&folders).Error; err != nil {
 		return nil, nil, err
 	}
 	children := map[string][]models.TestCaseFolder{}
@@ -327,7 +352,7 @@ func collectFolderCases(db *gorm.DB, userID, folderID string, recursive bool) (r
 	walk(folderID)
 
 	var cases []models.TestCase
-	if err = db.Where("user_id = ? AND folder_id IN ?", userID, order).
+	if err = qaSameScope(db, root).Where("folder_id IN ?", order).
 		Order("created_at DESC, id ASC").Find(&cases).Error; err != nil {
 		return nil, nil, err
 	}
@@ -395,10 +420,11 @@ type folderRunSkipped struct {
 }
 
 type folderRunSummary struct {
-	Total   int `json:"total"`   // cases executed
-	Passed  int `json:"passed"`  // executed and passed
-	Failed  int `json:"failed"`  // executed and failed / errored
-	Skipped int `json:"skipped"` // in the folder but nothing executable (manual-only / no steps)
+	Total   int `json:"total"`            // cases executed
+	Passed  int `json:"passed"`           // executed and passed
+	Failed  int `json:"failed"`           // executed and failed / errored
+	Skipped int `json:"skipped"`          // in the folder but nothing executable (manual-only / no steps)
+	Drafts  int `json:"drafts,omitempty"` // MR runs: draft / inactive cases left out until reviewed
 }
 
 // Execute handles POST /api/test-folders/:id/execute — "Run all": runs every
@@ -425,7 +451,7 @@ func (h *TestCaseFolderHandler) Execute(c *gin.Context) {
 		return
 	}
 
-	runnable, skippedCases, err := collectFolderCases(h.db, userID, f.ID, recursive)
+	runnable, skippedCases, err := collectFolderCases(h.db, f, recursive)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load test cases"})
 		return
@@ -448,6 +474,7 @@ func (h *TestCaseFolderHandler) Execute(c *gin.Context) {
 		TestPlanID:   "",
 		TestFolderID: &folderID,
 		UserID:       userID,
+		WorkspaceID:  f.WorkspaceID,
 		Environment:  input.EnvironmentID,
 		Status:       "running",
 		Results:      "[]",

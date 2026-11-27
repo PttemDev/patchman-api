@@ -329,7 +329,11 @@ func TestCollectFolderCasesSelection(t *testing.T) {
 		return out
 	}
 
-	runnable, skipped, err := collectFolderCases(db, "alice", root, true)
+	var rootF models.TestCaseFolder
+	if err := db.First(&rootF, "id = ?", root).Error; err != nil {
+		t.Fatal(err)
+	}
+	runnable, skipped, err := collectFolderCases(db, rootF, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,15 +347,20 @@ func TestCollectFolderCasesSelection(t *testing.T) {
 		t.Errorf("skipped = %v, want [nosteps manual]", got)
 	}
 
-	runnable, _, _ = collectFolderCases(db, "alice", root, false)
+	runnable, _, _ = collectFolderCases(db, rootF, false)
 	if got := ids(runnable); !equalStrings(got, []string{"root-new", "root-old"}) {
 		t.Errorf("non-recursive = %v, want [root-new root-old]", got)
 	}
 
-	// Another user asking for alice's folder gets nothing.
-	runnable, skipped, _ = collectFolderCases(db, "bob", root, true)
-	if got := ids(runnable); !equalStrings(got, []string{"bobs"}) || len(skipped) != 0 {
-		t.Errorf("bob's view of alice's folder = %v / %v, want only his own case", got, ids(skipped))
+	// Another user can't reach alice's personal folder at all, and his own
+	// case filed under her folder id is not part of her run.
+	if _, ok := ownedFolder(db, "bob", root); ok {
+		t.Error("bob must not reach alice's personal folder")
+	}
+	for _, id := range ids(runnable) {
+		if id == "bobs" {
+			t.Error("bob's case leaked into alice's folder run")
+		}
 	}
 }
 

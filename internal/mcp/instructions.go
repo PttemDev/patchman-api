@@ -9,7 +9,7 @@ import (
 
 // Rules shared by many tools, sent once as server instructions instead of in
 // every tool description.
-const connectionRules = `Connections (databases, Elasticsearch, Redis, Kafka, S3, Kubernetes, Grafana, RabbitMQ, Graylog, observability, Git, Google Cloud):
+const connectionRules = `Connections (databases, Elasticsearch, Redis, Kafka, S3, Kubernetes, Grafana, RabbitMQ, Graylog, Jira, observability, Git, Google Cloud):
 - Find a connection's id with the matching list_*_connections tool, then pass it as connectionId (Google Cloud: list_gcp_credentials → credentialId). It is resolved under your grants: you see the user's own connections and the ones shared with them.
 - A connection kept only in the PatchMan desktop app (local scope) is reachable only through the desktop app's MCP server (patchman-local), not through a hosted PatchMan server.
 - Tool annotations say which tools only read (readOnlyHint) and which may change things (destructiveHint). Writes still need the user's grants, and some need allowWrite=true on a read-write connection.`
@@ -19,6 +19,12 @@ const gitRules = `Git tools (GitLab and GitHub):
 - A token connection calls GitLab / GitHub with its own access token. A GitLab connection without one authenticates as the user's linked GitLab account; when it isn't linked the call fails with 412 — ask the user to link GitLab in PatchMan Settings.
 - project is a GitLab project (numeric id or 'group/repo') or a GitHub repository (numeric id or 'owner/name').
 - On GitHub the same tools work with GitHub's names: merge request = pull request (iid = PR number), pipeline = workflow run, job = workflow job, schedule = a workflow with on: schedule (its id is the workflow id). git_run_pipeline needs workflow (see git_workflows); GitHub has no manual jobs (git_play_job fails), and secrets list names only — GitHub never returns their values.`
+
+// hostedRules goes only to agents on the hosted server: its tools run on
+// that server, never on the user's computer.
+const hostedRules = `Where tools run: this is the hosted PatchMan server. Every call runs on this server, not on the user's computer.
+- If the user asks to run something locally / on their machine, names a connection that list_*_connections here doesn't show, or a target only their computer can reach (localhost, VPN, office network), don't try it here. Tell them to add the PatchMan desktop app's MCP server (patchman-local: PatchMan desktop app → Settings → MCP → Local (this device); no token needed, the app must be running) to their AI client and run it through patchman-local.
+- A failed call whose nextStep points at patchman-local means the same: explain it to the user instead of retrying.`
 
 // serverInstructions assembles the instructions for the tool groups this
 // token can use.
@@ -30,6 +36,9 @@ func serverInstructions(scopes mcpscope.ToolScopes) string {
 	if scopes.Allows(mcpscope.GroupConnections) || scopes.Allows(mcpscope.GroupDB) || scopes.Allows(mcpscope.GroupK8s) ||
 		scopes.Allows(mcpscope.GroupGit) || scopes.Allows(mcpscope.GroupES) || scopes.Allows(mcpscope.GroupRedis) {
 		parts = append(parts, connectionRules)
+		if !embedded.Load() {
+			parts = append(parts, hostedRules)
+		}
 	}
 	if scopes.Allows(mcpscope.GroupGit) {
 		parts = append(parts, gitRules)

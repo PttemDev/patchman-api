@@ -10,7 +10,50 @@ import (
 	"strings"
 )
 
+// desktopMCPHow tells an agent on the hosted server how the user gets the
+// desktop app's MCP server, which runs on their own computer.
+const desktopMCPHow = "Ask the user to add the PatchMan desktop app's MCP server (patchman-local: PatchMan desktop app → Settings → MCP → Local (this device); no token needed, the app must be running) to their AI client, then run this through patchman-local. Don't retry it here."
+
+// unreachableMarkers are network errors meaning the backend could not reach
+// the target host at all (as opposed to the target rejecting the request).
+var unreachableMarkers = []string{
+	"dial tcp", "dial udp", "connection refused", "no such host", "i/o timeout",
+	"network is unreachable", "no route to host", "tls handshake timeout",
+	"server misbehaving",
+}
+
+func looksUnreachable(errText string) bool {
+	e := strings.ToLower(errText)
+	for _, m := range unreachableMarkers {
+		if strings.Contains(e, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostedStep is the hosted server's answer for calls that only the user's
+// own computer can make: a connection kept only in the desktop app, or a
+// target (localhost, VPN, office network) the server cannot reach. "" when
+// the error is neither, or when this IS the desktop's server.
+func hostedStep(code int, errText string) string {
+	if embedded.Load() || code < 400 {
+		return ""
+	}
+	e := strings.ToLower(errText)
+	switch {
+	case code == http.StatusNotFound && strings.Contains(e, "connection not found"):
+		return "This hosted PatchMan server has no connection with this id. Check it with the matching list_*_connections tool; if the connection is saved only in the PatchMan desktop app (local scope), this server cannot see it. " + desktopMCPHow
+	case looksUnreachable(errText):
+		return "This call ran on the hosted PatchMan server, which could not reach the target. Hosts that only the user's computer can reach (localhost, VPN, office network) work only through the desktop app. " + desktopMCPHow
+	}
+	return ""
+}
+
 func nextStepFor(code int, errText string) string {
+	if step := hostedStep(code, errText); step != "" {
+		return step
+	}
 	e := strings.ToLower(errText)
 	switch {
 	case strings.Contains(e, "confirm to run it"):
@@ -58,12 +101,6 @@ func withNextStep(code int, body string) string {
 	}
 	errText, _ := m["error"].(string)
 	step := nextStepFor(code, errText)
-	// On the hosted server an unknown connection id is most often one kept
-	// only in someone's desktop app (local scope) — the hosted MCP can't see
-	// it, so point at the desktop's MCP server (git already says so itself).
-	if code == http.StatusNotFound && !embedded.Load() && strings.Contains(strings.ToLower(errText), "connection not found") {
-		step += " If the connection is saved only in the PatchMan desktop app (local scope), call this tool through the desktop app's MCP server (patchman-local) instead — this hosted server cannot see it."
-	}
 	if step == "" {
 		return body
 	}

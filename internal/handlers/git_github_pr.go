@@ -222,6 +222,21 @@ type ghPull struct {
 	User           ghUser   `json:"user"`
 	Assignees      []ghUser `json:"assignees"`
 	Reviewers      []ghUser `json:"requested_reviewers"`
+	Labels         []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+	Milestone *struct {
+		Number int64  `json:"number"`
+		Title  string `json:"title"`
+	} `json:"milestone"`
+	// auto_merge is null unless auto-merge is enabled.
+	AutoMerge *struct {
+		MergeMethod string `json:"merge_method"`
+	} `json:"auto_merge"`
+	MergedBy       *ghUser `json:"merged_by"`
+	MergeCommitSHA *string `json:"merge_commit_sha"`
+	CommitsCount   int     `json:"commits"`
+	ChangedFiles   int     `json:"changed_files"`
 	Head           struct {
 		Ref  string `json:"ref"`
 		Sha  string `json:"sha"`
@@ -375,15 +390,35 @@ func (h *GitRemoteHandler) ghMergeRequest(c *gin.Context, userID string, conn *m
 	if !ok {
 		return
 	}
+	labels := make([]string, 0, len(p.Labels))
+	for _, l := range p.Labels {
+		labels = append(labels, l.Name)
+	}
+	var milestone, mergedBy any
+	if p.Milestone != nil {
+		milestone = gin.H{"id": p.Milestone.Number, "title": p.Milestone.Title}
+	}
+	if p.MergedBy != nil {
+		mergedBy = ghUserDTO(*p.MergedBy)
+	}
 	h.conns.audit(userID, conn.ID, "merge_request", true, gin.H{"project": project, "iid": iid})
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"iid": p.Number, "title": p.Title, "description": p.Body, "state": p.glState(),
 		"sourceBranch": p.Head.Ref, "targetBranch": p.Base.Ref, "author": p.User.Login,
 		"webUrl": p.HTMLURL, "createdAt": p.CreatedAt, "updatedAt": p.UpdatedAt,
 		"draft": p.Draft, "mergeStatus": p.mergeStatus(), "hasConflicts": p.hasConflicts(),
-		"sha":      p.Head.Sha,
-		"diffRefs": gin.H{"baseSha": p.Base.Sha, "headSha": p.Head.Sha, "startSha": p.Base.Sha},
-		"provider": "github",
+		"sha":            p.Head.Sha,
+		"diffRefs":       gin.H{"baseSha": p.Base.Sha, "headSha": p.Head.Sha, "startSha": p.Base.Sha},
+		"provider":       "github",
+		"authorUsername": p.User.Login, "mergedAt": p.MergedAt, "detailedMergeStatus": p.MergeableState,
+		"assignees": ghUsersDTO(p.Assignees), "reviewers": ghUsersDTO(p.Reviewers), "labels": labels,
+		"milestone": milestone, "mergedBy": mergedBy, "mergeCommitSha": p.MergeCommitSHA,
+		"autoMerge": p.AutoMerge != nil, "squash": p.AutoMerge != nil && p.AutoMerge.MergeMethod == "squash",
+		"removeSourceBranch": false, "notesCount": p.Comments + p.ReviewComments,
+		"changesCount": strconv.Itoa(p.ChangedFiles), "commitsCount": p.CommitsCount,
+		"reference": info.FullName + "#" + strconv.FormatInt(p.Number, 10),
+		"fork":      p.Head.Repo == nil || p.Base.Repo == nil || !strings.EqualFold(p.Head.Repo.FullName, p.Base.Repo.FullName),
+		"canMerge":  nil, "me": h.ghLoginSoft(conn, token),
 	}})
 }
 
@@ -420,6 +455,7 @@ type ghIssueComment struct {
 	ID        int64  `json:"id"`
 	Body      string `json:"body"`
 	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 	User      ghUser `json:"user"`
 }
 
@@ -450,7 +486,11 @@ func (h *GitRemoteHandler) ghMergeRequestNotes(c *gin.Context, userID string, co
 
 const ghThreadsQuery = `query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
 reviewThreads(first:100){nodes{id isResolved path line originalLine diffSide
-comments(first:100){nodes{databaseId body createdAt author{login avatarUrl}}}}}}}}`
+comments(first:100){nodes{databaseId body createdAt lastEditedAt viewerCanUpdate author{login avatarUrl}}}}}}}}`
+
+// lastEditedAt / viewerCanUpdate are GraphQL schema fields on
+// PullRequestReviewComment (doğrulanmadı live). If a server rejects the
+// query, MRDiscussions falls back to REST threads (not resolvable here).
 
 type ghThread struct {
 	ID           string `json:"id"`
@@ -461,10 +501,12 @@ type ghThread struct {
 	DiffSide     string `json:"diffSide"`
 	Comments     struct {
 		Nodes []struct {
-			DatabaseID int64  `json:"databaseId"`
-			Body       string `json:"body"`
-			CreatedAt  string `json:"createdAt"`
-			Author     *struct {
+			DatabaseID      int64   `json:"databaseId"`
+			Body            string  `json:"body"`
+			CreatedAt       string  `json:"createdAt"`
+			LastEditedAt    *string `json:"lastEditedAt"`
+			ViewerCanUpdate bool    `json:"viewerCanUpdate"`
+			Author          *struct {
 				Login     string `json:"login"`
 				AvatarURL string `json:"avatarUrl"`
 			} `json:"author"`
@@ -479,7 +521,8 @@ func (t ghThread) dto() gin.H {
 		if n.Author != nil {
 			login, avatar = n.Author.Login, n.Author.AvatarURL
 		}
-		notes = append(notes, gin.H{"id": n.DatabaseID, "body": n.Body, "author": login, "username": login, "avatarUrl": avatar, "createdAt": n.CreatedAt})
+		notes = append(notes, gin.H{"id": n.DatabaseID, "body": n.Body, "author": login, "username": login, "avatarUrl": avatar, "createdAt": n.CreatedAt,
+			"system": false, "edited": n.LastEditedAt != nil, "canEdit": n.ViewerCanUpdate})
 	}
 	line := t.Line
 	if line == nil {
@@ -525,9 +568,11 @@ func (h *GitRemoteHandler) ghMRDiscussions(c *gin.Context, userID string, conn *
 		d  gin.H
 	}
 	gen := []general{}
+	me := h.ghLoginSoft(conn, token)
 	for _, cm := range comments {
 		gen = append(gen, general{cm.CreatedAt, gin.H{"id": "ic-" + strconv.FormatInt(cm.ID, 10), "resolvable": false, "resolved": false,
-			"notes": []gin.H{{"id": cm.ID, "body": cm.Body, "author": cm.User.Login, "username": cm.User.Login, "avatarUrl": cm.User.AvatarURL, "createdAt": cm.CreatedAt}}}})
+			"notes": []gin.H{{"id": cm.ID, "body": cm.Body, "author": cm.User.Login, "username": cm.User.Login, "avatarUrl": cm.User.AvatarURL, "createdAt": cm.CreatedAt,
+				"system": false, "edited": cm.UpdatedAt != "" && cm.UpdatedAt != cm.CreatedAt, "canEdit": me != "" && strings.EqualFold(cm.User.Login, me)}}}})
 	}
 	var reviews []struct {
 		ID          int64  `json:"id"`
@@ -551,7 +596,9 @@ func (h *GitRemoteHandler) ghMRDiscussions(c *gin.Context, userID string, conn *
 			body = "✋ " + body
 		}
 		gen = append(gen, general{r.SubmittedAt, gin.H{"id": "rv-" + strconv.FormatInt(r.ID, 10), "resolvable": false, "resolved": false,
-			"notes": []gin.H{{"id": r.ID, "body": body, "author": r.User.Login, "username": r.User.Login, "avatarUrl": r.User.AvatarURL, "createdAt": r.SubmittedAt}}}})
+			// A submitted review's summary can't be edited from here (canEdit false).
+			"notes": []gin.H{{"id": r.ID, "body": body, "author": r.User.Login, "username": r.User.Login, "avatarUrl": r.User.AvatarURL, "createdAt": r.SubmittedAt,
+				"system": false, "canEdit": false}}}})
 	}
 	sort.SliceStable(gen, func(i, j int) bool { return gen[i].at < gen[j].at })
 	for _, g := range gen {
@@ -579,14 +626,14 @@ func (h *GitRemoteHandler) ghMRDiscussions(c *gin.Context, userID string, conn *
 		if _, ok := h.ghJSON(c, conn, token, ghRepoPath(info)+"/pulls/"+iid+"/comments", url.Values{"per_page": {"100"}}, &rc); !ok {
 			return
 		}
-		out = append(out, groupReviewComments(rc)...)
+		out = append(out, groupReviewComments(rc, me)...)
 	}
 	h.conns.audit(userID, conn.ID, "merge_request_discussions", true, gin.H{"project": project, "iid": iid})
 	c.JSON(http.StatusOK, gin.H{"data": out})
 }
 
 // groupReviewComments threads REST review comments by their root comment.
-func groupReviewComments(rc []ghReviewComment) []gin.H {
+func groupReviewComments(rc []ghReviewComment, me string) []gin.H {
 	order := []int64{}
 	threads := map[int64][]ghReviewComment{}
 	for _, cm := range rc {
@@ -605,7 +652,8 @@ func groupReviewComments(rc []ghReviewComment) []gin.H {
 		first := cs[0]
 		notes := make([]gin.H, 0, len(cs))
 		for _, cm := range cs {
-			notes = append(notes, gin.H{"id": cm.ID, "body": cm.Body, "author": cm.User.Login, "username": cm.User.Login, "avatarUrl": cm.User.AvatarURL, "createdAt": cm.CreatedAt})
+			notes = append(notes, gin.H{"id": cm.ID, "body": cm.Body, "author": cm.User.Login, "username": cm.User.Login, "avatarUrl": cm.User.AvatarURL, "createdAt": cm.CreatedAt,
+				"system": false, "canEdit": me != "" && strings.EqualFold(cm.User.Login, me)})
 		}
 		line := first.Line
 		if line == nil {
@@ -1109,8 +1157,29 @@ func (h *GitRemoteHandler) ghUpdateMR(c *gin.Context, userID string, conn *model
 			}
 		}
 	}
-	if !h.ghRequestPeople(c, conn, token, userID, info, iid, in.ReviewerIDs, in.AssigneeIDs, detail) {
+	if !h.ghSetPeople(c, conn, token, userID, info, iid, in.ReviewerIDs, in.AssigneeIDs, detail) {
 		return
+	}
+	if in.Labels != nil {
+		labels := []string{}
+		for _, l := range strings.Split(*in.Labels, ",") {
+			if l = strings.TrimSpace(l); l != "" {
+				labels = append(labels, l)
+			}
+		}
+		// PUT replaces the whole set ([] clears it).
+		if _, ok := h.ghWrite(c, conn, token, userID, "merge_request_labels", http.MethodPut, ghRepoPath(info)+"/issues/"+iid+"/labels", gin.H{"labels": labels}, detail); !ok {
+			return
+		}
+	}
+	if in.MilestoneID != nil {
+		var ms any // null clears
+		if *in.MilestoneID > 0 {
+			ms = *in.MilestoneID
+		}
+		if _, ok := h.ghWrite(c, conn, token, userID, "merge_request_milestone", http.MethodPatch, ghRepoPath(info)+"/issues/"+iid, gin.H{"milestone": ms}, detail); !ok {
+			return
+		}
 	}
 	if out == nil {
 		p, ok := h.ghPull(c, conn, token, info, iid)
@@ -1139,9 +1208,17 @@ func (h *GitRemoteHandler) ghMergeMR(c *gin.Context, userID string, conn *models
 	if in.Squash {
 		method = "squash"
 	}
-	detail := gin.H{"project": project, "iid": iid, "squash": in.Squash, "auto": in.MergeWhenPipelineSucceeds}
+	switch in.MergeMethod {
+	case "":
+	case "merge", "squash", "rebase":
+		method = in.MergeMethod
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "mergeMethod must be merge, squash or rebase"})
+		return
+	}
+	detail := gin.H{"project": project, "iid": iid, "squash": in.Squash, "method": method, "auto": in.MergeWhenPipelineSucceeds}
 	title, msg := "", ""
-	if m := in.commitMessage(); m != "" {
+	if m := in.commitMessage(); m != "" && method != "rebase" { // a rebase writes no merge commit
 		title, msg, _ = strings.Cut(m, "\n")
 		title, msg = strings.TrimSpace(title), strings.TrimSpace(msg)
 	}

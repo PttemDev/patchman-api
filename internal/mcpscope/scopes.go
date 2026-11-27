@@ -38,6 +38,7 @@ const (
 	GroupObservability = "observability"
 	GroupGraylog       = "graylog"
 	GroupGCP           = "gcp"
+	GroupJira          = "jira"
 )
 
 // AllGroups is the canonical, ordered list of tool-group keys.
@@ -46,6 +47,7 @@ func AllGroups() []string {
 		GroupCollections, GroupRequests, GroupEnvironments, GroupTestCases, GroupMocks,
 		GroupConnections, GroupHTTP, GroupDB, GroupES, GroupRedis, GroupKafka, GroupS3, GroupK8s, GroupGit, GroupDevTools,
 		GroupWhiteboards, GroupNotes, GroupGrafana, GroupRabbitMQ, GroupObservability, GroupGraylog, GroupGCP,
+		GroupJira,
 	}
 }
 

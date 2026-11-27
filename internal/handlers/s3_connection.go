@@ -51,7 +51,7 @@ type updateS3Input struct {
 	Endpoint           *string        `json:"endpoint"`
 	Region             *string        `json:"region"`
 	AccessKeyID        *string        `json:"accessKeyId"`
-	SecretKey          *string        `json:"secretKey"`   // nil = keep, "" = clear
+	SecretKey          *string        `json:"secretKey"` // nil = keep, "" = clear
 	SessionToken       *string        `json:"sessionToken"`
 	ForcePathStyle     *bool          `json:"forcePathStyle"`
 	InsecureSkipVerify *bool          `json:"insecureSkipVerify"`
@@ -321,6 +321,10 @@ func (h *S3ConnectionHandler) Test(c *gin.Context) {
 			Provider: input.Provider, Endpoint: input.Endpoint, Region: region,
 			AccessKeyID: input.AccessKeyID, SecretKeyEnc: secretEnc, SessionTokenEnc: tokenEnc,
 			ForcePathStyle: input.ForcePathStyle, InsecureSkipVerify: input.InsecureSkipVerify,
+		}
+		if input.Options != nil {
+			b, _ := json.Marshal(input.Options)
+			conn.OptionsJSON = string(b)
 		}
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 12*time.Second)

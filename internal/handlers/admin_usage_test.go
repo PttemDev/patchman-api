@@ -60,6 +60,7 @@ func adminUsageTestDB(t *testing.T) *gorm.DB {
 		&models.GrafanaConnection{}, &models.GrafanaActivityHistory{},
 		&models.RabbitConnection{}, &models.RabbitActivityHistory{},
 		&models.GraylogConnection{}, &models.GraylogActivityHistory{},
+		&models.JiraConnection{}, &models.JiraActivityHistory{},
 		&models.ObservabilityConnection{}, &models.ObservabilityActivityHistory{},
 		&models.LLMProvider{},
 	); err != nil {

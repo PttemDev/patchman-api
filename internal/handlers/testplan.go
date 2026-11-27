@@ -70,7 +70,11 @@ func (h *TestPlanHandler) List(c *gin.Context) {
 	userID := c.GetString("userID")
 
 	var plans []models.TestPlan
-	if err := h.db.Where("user_id = ?", userID).Order("created_at DESC").Find(&plans).Error; err != nil {
+	scope, ok := qaListScope(h.db, c, userID)
+	if !ok {
+		return
+	}
+	if err := scope.Order("created_at DESC").Find(&plans).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch test plans"})
 		return
 	}
@@ -104,9 +108,14 @@ func (h *TestPlanHandler) Create(c *gin.Context) {
 		testCaseIDsJSON = string(b)
 	}
 
+	ws, ok := qaCreateWorkspace(h.db, c, userID)
+	if !ok {
+		return
+	}
 	plan := models.TestPlan{
 		ID:          newID,
 		UserID:      userID,
+		WorkspaceID: ws,
 		Name:        input.Name,
 		Description: input.Description,
 		Status:      status,
@@ -126,8 +135,7 @@ func (h *TestPlanHandler) Get(c *gin.Context) {
 	id := c.Param("id")
 
 	var plan models.TestPlan
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&plan).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test plan not found"})
+	if !qaLoad(h.db, c, userID, id, &plan, ViewerRole, "Test plan not found") {
 		return
 	}
 
@@ -139,8 +147,7 @@ func (h *TestPlanHandler) Update(c *gin.Context) {
 	id := c.Param("id")
 
 	var plan models.TestPlan
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&plan).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test plan not found"})
+	if !qaLoad(h.db, c, userID, id, &plan, EditorRole, "Test plan not found") {
 		return
 	}
 
@@ -179,8 +186,7 @@ func (h *TestPlanHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 
 	var plan models.TestPlan
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&plan).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test plan not found"})
+	if !qaLoad(h.db, c, userID, id, &plan, OwnerRole, "Test plan not found") {
 		return
 	}
 
@@ -246,6 +252,15 @@ func serializeTestRun(r models.TestRun) gin.H {
 	if r.TestFolderID != nil {
 		out["testFolderId"] = *r.TestFolderID
 	}
+	if r.WorkspaceID != nil {
+		out["workspaceId"] = *r.WorkspaceID
+	}
+	if r.MRRef != "" {
+		out["mrRef"] = r.MRRef
+	}
+	if r.JiraKey != "" {
+		out["jiraKey"] = r.JiraKey
+	}
 	return out
 }
 
@@ -263,8 +278,7 @@ func (h *TestRunHandler) Create(c *gin.Context) {
 
 	// Verify plan belongs to user
 	var plan models.TestPlan
-	if err := h.db.Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test plan not found"})
+	if !qaLoad(h.db, c, userID, planID, &plan, EditorRole, "Test plan not found") {
 		return
 	}
 
@@ -279,6 +293,7 @@ func (h *TestRunHandler) Create(c *gin.Context) {
 		ID:          uuid.New().String(),
 		TestPlanID:  planID,
 		UserID:      userID,
+		WorkspaceID: plan.WorkspaceID,
 		Environment: input.Environment,
 		Status:      "running",
 		Results:     "[]",
@@ -304,7 +319,11 @@ func (h *TestRunHandler) ListAll(c *gin.Context) {
 	userID := c.GetString("userID")
 
 	var runs []models.TestRun
-	if err := h.db.Where("user_id = ?", userID).
+	scope, ok := qaListScope(h.db, c, userID)
+	if !ok {
+		return
+	}
+	if err := scope.
 		Order("created_at DESC").
 		Find(&runs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch test runs"})
@@ -320,8 +339,7 @@ func (h *TestRunHandler) ListByPlan(c *gin.Context) {
 
 	// Verify plan belongs to user
 	var plan models.TestPlan
-	if err := h.db.Where("id = ? AND user_id = ?", planID, userID).First(&plan).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test plan not found"})
+	if !qaLoad(h.db, c, userID, planID, &plan, ViewerRole, "Test plan not found") {
 		return
 	}
 
@@ -341,8 +359,7 @@ func (h *TestRunHandler) Get(c *gin.Context) {
 	id := c.Param("id")
 
 	var run models.TestRun
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&run).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test run not found"})
+	if !qaLoad(h.db, c, userID, id, &run, ViewerRole, "Test run not found") {
 		return
 	}
 
@@ -354,8 +371,7 @@ func (h *TestRunHandler) Update(c *gin.Context) {
 	id := c.Param("id")
 
 	var run models.TestRun
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&run).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test run not found"})
+	if !qaLoad(h.db, c, userID, id, &run, EditorRole, "Test run not found") {
 		return
 	}
 
@@ -397,8 +413,7 @@ func (h *TestRunHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 
 	var run models.TestRun
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&run).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test run not found"})
+	if !qaLoad(h.db, c, userID, id, &run, OwnerRole, "Test run not found") {
 		return
 	}
 

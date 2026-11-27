@@ -148,6 +148,9 @@ type createTestCaseIn struct {
 	Steps       string `json:"steps,omitempty" jsonschema:"steps as a JSON array string; see the tool description for the step shape"`
 	Status      string `json:"status,omitempty" jsonschema:"draft/active/deprecated"`
 	FolderID    string `json:"folderId,omitempty" jsonschema:"test folder id to file the case in (see list_test_folders); omit for the root"`
+	WorkspaceID string `json:"workspaceId,omitempty" jsonschema:"workspace to share the case with (its team sees it); omit for a personal case"`
+	JiraKey     string `json:"jiraKey,omitempty" jsonschema:"the Jira issue this case tests, e.g. MER-936 (CR + QA Hub links it to the issue's MRs)"`
+	MRRef       string `json:"mrRef,omitempty" jsonschema:"the MR this case tests as <linkId>:<iid> (from qa_mr_context)"`
 }
 type updateTestCaseIn struct {
 	ID          string `json:"id" jsonschema:"test case id to update"`
@@ -158,6 +161,8 @@ type updateTestCaseIn struct {
 	Tags        string `json:"tags,omitempty" jsonschema:"comma-separated tags (replaces the list)"`
 	Steps       string `json:"steps,omitempty" jsonschema:"steps as a JSON array string (replaces all steps); see the tool description for the step shape"`
 	Status      string `json:"status,omitempty"`
+	JiraKey     string `json:"jiraKey,omitempty" jsonschema:"the Jira issue this case tests"`
+	MRRef       string `json:"mrRef,omitempty" jsonschema:"the MR this case tests as <linkId>:<iid>"`
 }
 
 // testStepShape documents the step objects the QA runner and editor read.
@@ -171,9 +176,24 @@ const testStepShape = " Steps run in order against a shared variable scope; each
 // Test-case folders. A folder nests under parentId (null = top level); a case
 // sits in folderId (null = root). Folders are owner-only, like test cases.
 type createTestFolderIn struct {
-	Name     string `json:"name" jsonschema:"folder name"`
-	ParentID string `json:"parentId,omitempty" jsonschema:"parent folder id for a subfolder; omit for a top-level folder"`
+	Name        string `json:"name" jsonschema:"folder name"`
+	ParentID    string `json:"parentId,omitempty" jsonschema:"parent folder id for a subfolder; omit for a top-level folder"`
+	WorkspaceID string `json:"workspaceId,omitempty" jsonschema:"workspace to share the folder with; omit for a personal folder (a subfolder must be in its parent's workspace)"`
 }
+
+// qaWorkspaceIn: which QA space a list reads — a workspace, or (omitted)
+// the caller's personal items.
+type qaWorkspaceIn struct {
+	WorkspaceID string `json:"workspaceId,omitempty" jsonschema:"workspace whose shared QA items to list; omit for your personal items"`
+}
+
+func qaWS(path, ws string) string {
+	if ws == "" {
+		return path
+	}
+	return path + "?workspaceId=" + url.QueryEscape(ws)
+}
+
 type renameTestFolderIn struct {
 	ID   string `json:"id" jsonschema:"folder id to rename"`
 	Name string `json:"name" jsonschema:"new folder name"`
@@ -193,34 +213,40 @@ type runTestFolderIn struct {
 }
 
 func registerTestCaseTools(s *mcpsdk.Server, c *caller) {
-	reg(s, "list_test_cases", "List the caller's test cases. Each carries folderId (null = root; see list_test_folders).",
-		func(_ struct{}) (int, string) { return c.call("GET", "/api/test-cases", nil) })
+	reg(s, "list_test_cases", "List test cases: your personal ones, or a workspace's shared ones (workspaceId). Each carries folderId (null = root; see list_test_folders).",
+		func(in qaWorkspaceIn) (int, string) {
+			return c.cloudOrLocal("GET", qaWS("/api/test-cases", in.WorkspaceID), nil)
+		})
 	reg(s, "get_test_case", "Get a single test case by id.",
-		func(in idIn) (int, string) { return c.call("GET", "/api/test-cases/"+url.PathEscape(in.ID), nil) })
+		func(in idIn) (int, string) { return c.cloudOrLocal("GET", "/api/test-cases/"+url.PathEscape(in.ID), nil) })
 	reg(s, "create_test_case", "Create a new test case."+testStepShape,
-		func(in createTestCaseIn) (int, string) { return c.call("POST", "/api/test-cases", in) })
+		func(in createTestCaseIn) (int, string) {
+			return c.cloudOrLocal("POST", qaWS("/api/test-cases", in.WorkspaceID), in)
+		})
 	reg(s, "update_test_case", "Update an existing test case. Fields you omit stay as they are."+testStepShape,
 		func(in updateTestCaseIn) (int, string) {
-			return c.call("PUT", "/api/test-cases/"+url.PathEscape(in.ID), in)
+			return c.cloudOrLocal("PUT", "/api/test-cases/"+url.PathEscape(in.ID), in)
 		})
 	reg(s, "delete_test_case", "Delete a test case by id.",
 		func(in idIn) (int, string) {
-			return c.call("DELETE", "/api/test-cases/"+url.PathEscape(in.ID), nil)
+			return c.cloudOrLocal("DELETE", "/api/test-cases/"+url.PathEscape(in.ID), nil)
 		})
 
-	reg(s, "list_test_folders", "List the caller's test-case folders (flat; build the tree from parentId, null = top level). Test cases reference them by folderId.",
-		func(_ struct{}) (int, string) { return c.call("GET", "/api/test-folders", nil) })
+	reg(s, "list_test_folders", "List test-case folders: your personal ones, or a workspace's shared ones (workspaceId). Flat; build the tree from parentId (null = top level). Test cases reference them by folderId.",
+		func(in qaWorkspaceIn) (int, string) {
+			return c.cloudOrLocal("GET", qaWS("/api/test-folders", in.WorkspaceID), nil)
+		})
 	reg(s, "create_test_folder", "Create a test-case folder, optionally inside another folder (parentId).",
 		func(in createTestFolderIn) (int, string) {
 			body := map[string]any{"name": in.Name}
 			if in.ParentID != "" {
 				body["parentId"] = in.ParentID
 			}
-			return c.call("POST", "/api/test-folders", body)
+			return c.cloudOrLocal("POST", qaWS("/api/test-folders", in.WorkspaceID), body)
 		})
 	reg(s, "rename_test_folder", "Rename a test-case folder.",
 		func(in renameTestFolderIn) (int, string) {
-			return c.call("PUT", "/api/test-folders/"+url.PathEscape(in.ID), map[string]any{"name": in.Name})
+			return c.cloudOrLocal("PUT", "/api/test-folders/"+url.PathEscape(in.ID), map[string]any{"name": in.Name})
 		})
 	reg(s, "delete_test_folder", "Delete a test-case folder. Refused (409, with counts) while it still holds test cases or subfolders unless moveContentsToParent=true, which moves them to the folder's parent first.",
 		func(in deleteTestFolderIn) (int, string) {
@@ -228,7 +254,7 @@ func registerTestCaseTools(s *mcpsdk.Server, c *caller) {
 			if in.MoveContentsToParent {
 				p += "?moveToParent=true"
 			}
-			return c.call("DELETE", p, nil)
+			return c.cloudOrLocal("DELETE", p, nil)
 		})
 	reg(s, "move_test_case", "Move a test case into a folder, or to the root when folderId is empty.",
 		func(in moveTestCaseIn) (int, string) {
@@ -236,7 +262,7 @@ func registerTestCaseTools(s *mcpsdk.Server, c *caller) {
 			if in.FolderID != "" {
 				folder = in.FolderID
 			}
-			return c.call("PUT", "/api/test-cases/"+url.PathEscape(in.ID)+"/move", map[string]any{"folderId": folder})
+			return c.cloudOrLocal("PUT", "/api/test-cases/"+url.PathEscape(in.ID)+"/move", map[string]any{"folderId": folder})
 		})
 	regCtx(s, "run_test_folder", "Run every executable test case in a folder (and its subfolders unless recursive=false), sequentially, with the given environment's variables. Cases with no executable steps are skipped and listed. Records a test run (runId) and returns its summary plus each case's status and the failing steps.",
 		func(ctx context.Context, in runTestFolderIn) (int, string) {
@@ -247,7 +273,7 @@ func registerTestCaseTools(s *mcpsdk.Server, c *caller) {
 			if in.Recursive != nil {
 				body["recursive"] = *in.Recursive
 			}
-			code, raw := c.callCtx(ctx, "POST", "/api/test-folders/"+url.PathEscape(in.ID)+"/execute", body)
+			code, raw := c.cloudOrLocalCtx(ctx, "POST", "/api/test-folders/"+url.PathEscape(in.ID)+"/execute", body)
 			if code >= 400 {
 				return code, raw
 			}

@@ -1,0 +1,3 @@
+ZDOTDIR=$PATCHMAN_USER_ZDOTDIR
+if [[ -f $ZDOTDIR/.zprofile ]]; then source "$ZDOTDIR/.zprofile"; fi
+ZDOTDIR=$PATCHMAN_ZDOTDIR

@@ -1,6 +1,10 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"strings"
+	"time"
+)
 
 // S3Connection is a saved S3-compatible object-storage credential set
 // (AWS S3, MinIO, Ceph RGW, Wasabi, R2, B2, DigitalOcean Spaces, …). The
@@ -17,10 +21,10 @@ type S3Connection struct {
 	// aws | minio | ceph | wasabi | r2 | b2 | spaces | gcs | oracle | custom
 	Provider string `gorm:"type:varchar(30);not null;default:'aws'" json:"provider"`
 	// Endpoint override for non-AWS / on-prem. Empty = AWS default.
-	Endpoint       string `gorm:"type:varchar(500)" json:"endpoint,omitempty"`
-	Region         string `gorm:"type:varchar(100);not null;default:'us-east-1'" json:"region"`
-	AccessKeyID    string `gorm:"type:varchar(255)" json:"accessKeyId,omitempty"`
-	SecretKeyEnc   string `gorm:"type:text" json:"-"`
+	Endpoint        string `gorm:"type:varchar(500)" json:"endpoint,omitempty"`
+	Region          string `gorm:"type:varchar(100);not null;default:'us-east-1'" json:"region"`
+	AccessKeyID     string `gorm:"type:varchar(255)" json:"accessKeyId,omitempty"`
+	SecretKeyEnc    string `gorm:"type:text" json:"-"`
 	SessionTokenEnc string `gorm:"type:text" json:"-"`
 	// On-prem storage (MinIO/Ceph) needs path-style addressing; virtual-
 	// hosted (AWS) uses false.
@@ -64,3 +68,30 @@ type S3ActivityHistory struct {
 }
 
 func (S3ActivityHistory) TableName() string { return "s3_activity_history" }
+
+// S3Pin is a connection limited to one bucket and, optionally, a path in it
+// (options.bucket / options.prefix). Keys with path-based policies can't
+// list buckets or a bucket's root, so the tool starts there instead.
+type S3Pin struct {
+	Bucket string `json:"bucket"`
+	Prefix string `json:"prefix"`
+}
+
+// Pin reads the bucket / path the connection is limited to ("" = none).
+func (c S3Connection) Pin() S3Pin {
+	var o struct {
+		Bucket string `json:"bucket"`
+		Prefix string `json:"prefix"`
+	}
+	if c.OptionsJSON != "" {
+		_ = json.Unmarshal([]byte(c.OptionsJSON), &o)
+	}
+	p := S3Pin{Bucket: strings.TrimSpace(o.Bucket), Prefix: strings.TrimLeft(strings.TrimSpace(o.Prefix), "/")}
+	if p.Prefix != "" && !strings.HasSuffix(p.Prefix, "/") {
+		p.Prefix += "/"
+	}
+	if p.Bucket == "" {
+		p.Prefix = ""
+	}
+	return p
+}

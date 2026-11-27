@@ -4,6 +4,7 @@ import (
 	"errors"
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -153,12 +154,13 @@ func (h *DBQueryExecuteHandler) Execute(c *gin.Context) {
 	defer h.unregisterCancel(queryID)
 	defer cancel()
 
-	// Multi-statement support — only for SQL. Mongo is single-call by
-	// design (the intent parser already rejects unquoted `;`).
+	// Multi-statement support: SQL splits on `;`; a Mongo script (`use`,
+	// variables, several calls) expands into its calls, each its own result.
 	var statements []string
-	if conn.Kind == "postgres" || conn.Kind == "mysql" || conn.Kind == "sqlserver" || conn.Kind == "bigquery" {
+	switch {
+	case conn.Kind == "postgres" || conn.Kind == "mysql" || conn.Kind == "sqlserver" || conn.Kind == "bigquery":
 		statements = dbquery.SplitSQL(input.Query)
-	} else {
+	default:
 		statements = []string{input.Query}
 	}
 	if len(statements) == 0 {
@@ -174,19 +176,58 @@ func (h *DBQueryExecuteHandler) Execute(c *gin.Context) {
 	}
 
 	execOpts := dbquery.ExecOpts{Limit: limit + input.Offset + 1}
+	// Who may write — BigQuery re-checks it on the dry run, a Mongo script on
+	// every write call it makes.
+	switch {
+	case !conn.AllowWrite:
+		execOpts.WriteDenied = "this connection is read-only. Enable read-write from its ⋯ menu to run write statements."
+	case !canManage(role):
+		execOpts.WriteDenied = "you have read-only access to this shared connection."
+	case c.GetHeader(mcpClientHeader) == mcpClientHeaderValue && !input.AllowWrite:
+		execOpts.WriteDenied = "this script writes data. Pass allowWrite=true to run it (the connection has read-write enabled)."
+	default:
+		execOpts.AllowWrite = true
+	}
 	if conn.Kind == "bigquery" {
 		execOpts.MaxBytes, execOpts.AskBytes = bigQueryLimits(h.db, userID, conn)
 		execOpts.CostConfirmed = input.ConfirmCost
-		// The read-only gate above already ran (SQL classifier); the driver
-		// re-checks against the dry run's statement type, so a write the
-		// classifier missed still can't run on a read-only connection.
-		execOpts.AllowWrite = conn.AllowWrite && canManage(role) &&
-			(c.GetHeader(mcpClientHeader) != mcpClientHeaderValue || input.AllowWrite)
+	}
+	// A Mongo script runs whole in the JavaScript engine; its shown values and
+	// print output become the statements' results below.
+	var scripted []dbquery.ScriptResult
+	if conn.Kind == "mongo" && dbquery.IsMongoJSScript(input.Query) {
+		runner, ok := sess.(dbquery.MongoScripter)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "scripts are not supported on this connection"})
+			return
+		}
+		outcome, err := runner.ExecuteScript(ctx, input.Query, execOpts)
+		if err != nil {
+			ms := int(time.Since(start).Milliseconds())
+			h.recordHistory(userID, role, conn, input.Query, 0, ms, false, err.Error())
+			msg := err.Error()
+			if outcome != nil && len(outcome.Output) > 0 {
+				msg += "\n\nOutput before the error:\n" + strings.Join(lastLines(outcome.Output, 20), "\n")
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+			return
+		}
+		scripted = dbquery.ScriptResults(outcome)
+		statements = make([]string, len(scripted))
+		for i, r := range scripted {
+			statements[i] = r.Label
+		}
 	}
 	results := make([]dbExecuteOutput, 0, len(statements))
 	totalRows := 0
 	for stmtIdx, stmt := range statements {
-		cur, err := sess.Execute(ctx, stmt, execOpts)
+		var cur dbquery.Cursor
+		var err error
+		if scripted != nil {
+			cur = scripted[stmtIdx].Cursor
+		} else {
+			cur, err = sess.Execute(ctx, stmt, execOpts)
+		}
 		if err != nil {
 			ms := int(time.Since(start).Milliseconds())
 			h.recordHistory(userID, role, conn, input.Query, totalRows, ms, false, err.Error())
@@ -344,3 +385,10 @@ func (h *DBQueryExecuteHandler) recordHistory(userID, role string, conn *models.
 	go h.db.Create(&row)
 }
 
+
+func lastLines(lines []string, n int) []string {
+	if len(lines) > n {
+		return lines[len(lines)-n:]
+	}
+	return lines
+}

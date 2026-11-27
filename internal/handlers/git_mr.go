@@ -132,6 +132,13 @@ type mrUpdateInput struct {
 	ReviewerIDs  []int64 `json:"reviewerIds"`
 	AssigneeIDs  []int64 `json:"assigneeIds"`
 	StateEvent   string  `json:"stateEvent"` // close | reopen
+	// Labels replaces the label set (comma-separated, "" clears).
+	Labels *string `json:"labels"`
+	// MilestoneID sets the milestone (GitHub: its number); 0 clears it.
+	MilestoneID *int64 `json:"milestoneId"`
+	// Merge settings stored on the MR (GitLab only; GitHub decides at merge).
+	Squash             *bool `json:"squash"`
+	RemoveSourceBranch *bool `json:"removeSourceBranch"`
 }
 
 // UpdateMR — POST /git/connections/:id/merge_request_update?project=&iid=
@@ -191,6 +198,21 @@ func (h *GitRemoteHandler) UpdateMR(c *gin.Context) {
 	if in.AssigneeIDs != nil {
 		body["assignee_ids"] = in.AssigneeIDs
 	}
+	// labels / milestone_id / squash / remove_source_branch, and an empty
+	// reviewer_ids / assignee_ids clearing everyone, follow the GitLab docs
+	// (doğrulanmadı against a live instance).
+	if in.Labels != nil {
+		body["labels"] = *in.Labels
+	}
+	if in.MilestoneID != nil {
+		body["milestone_id"] = *in.MilestoneID
+	}
+	if in.Squash != nil {
+		body["squash"] = *in.Squash
+	}
+	if in.RemoveSourceBranch != nil {
+		body["remove_source_branch"] = *in.RemoveSourceBranch
+	}
 	switch in.StateEvent {
 	case "":
 	case "close", "reopen":
@@ -214,13 +236,16 @@ type mrMergeInput struct {
 	SquashCommitMessage       string `json:"squashCommitMessage"`
 	// MergeCommitMessage replaces the default merge commit message (no squash).
 	MergeCommitMessage string `json:"mergeCommitMessage"`
+	// MergeMethod picks GitHub's merge | squash | rebase ("" = from Squash).
+	// GitLab's method is a project setting, so it is ignored there.
+	MergeMethod string `json:"mergeMethod"`
 }
 
 // commitMessage is the message the user edited for this merge ("" = the
 // provider's default): the squash message when squashing, else the merge
 // commit's.
 func (in mrMergeInput) commitMessage() string {
-	if in.Squash {
+	if in.Squash || in.MergeMethod == "squash" {
 		return strings.TrimSpace(in.SquashCommitMessage)
 	}
 	return strings.TrimSpace(in.MergeCommitMessage)
@@ -329,6 +354,7 @@ type glNote struct {
 	Body       string `json:"body"`
 	System     bool   `json:"system"`
 	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
 	Resolvable bool   `json:"resolvable"`
 	Resolved   bool   `json:"resolved"`
 	Author     struct {
@@ -370,18 +396,25 @@ func (h *GitRemoteHandler) MRDiscussions(c *gin.Context) {
 	if _, ok := h.getJSON(c, token, mrPath(project, iid)+"/discussions", q, &raw); !ok {
 		return
 	}
+	// ?system=1 also returns system notes ("added 1 commit", "approved"),
+	// flagged system:true, for the activity timeline. Off by default so MCP
+	// callers keep getting only conversations.
+	withSystem := c.Query("system") == "1"
+	me := h.glUsername(c, token)
 	out := make([]gin.H, 0, len(raw))
 	for _, d := range raw {
-		if len(d.Notes) == 0 || d.Notes[0].System {
-			continue // "added 1 commit" etc.
+		if len(d.Notes) == 0 || (d.Notes[0].System && !withSystem) {
+			continue
 		}
 		notes := make([]gin.H, 0, len(d.Notes))
 		for _, n := range d.Notes {
+			edited := n.UpdatedAt != "" && n.UpdatedAt != n.CreatedAt && !n.System
 			notes = append(notes, gin.H{"id": n.ID, "body": n.Body, "author": n.Author.Name, "username": n.Author.Username,
-				"avatarUrl": n.Author.AvatarURL, "createdAt": n.CreatedAt})
+				"avatarUrl": n.Author.AvatarURL, "createdAt": n.CreatedAt, "system": n.System, "edited": edited,
+				"canEdit": !n.System && me != "" && strings.EqualFold(n.Author.Username, me)})
 		}
 		first := d.Notes[0]
-		item := gin.H{"id": d.ID, "notes": notes, "resolvable": first.Resolvable, "resolved": first.Resolved}
+		item := gin.H{"id": d.ID, "notes": notes, "resolvable": first.Resolvable, "resolved": first.Resolved, "system": first.System}
 		if p := first.Position; p != nil {
 			item["position"] = gin.H{"newPath": p.NewPath, "oldPath": p.OldPath, "newLine": p.NewLine, "oldLine": p.OldLine}
 		}
@@ -579,7 +612,7 @@ func (h *GitRemoteHandler) MRPipelines(c *gin.Context) {
 		WebURL    string `json:"web_url"`
 		CreatedAt string `json:"created_at"`
 	}
-	if _, ok := h.getJSON(c, token, mrPath(project, iid)+"/pipelines", url.Values{"per_page": {"5"}}, &raw); !ok {
+	if _, ok := h.getJSON(c, token, mrPath(project, iid)+"/pipelines", url.Values{"per_page": {strconv.Itoa(pipelineLimit(c))}}, &raw); !ok {
 		return
 	}
 	out := make([]gin.H, 0, len(raw))
@@ -622,4 +655,17 @@ func (h *GitRemoteHandler) ProjectMembers(c *gin.Context) {
 		out = append(out, gin.H{"id": m.ID, "name": m.Name, "username": m.Username, "avatarUrl": m.AvatarURL})
 	}
 	c.JSON(http.StatusOK, gin.H{"data": out})
+}
+
+// pipelineLimit is ?limit= for the MR pipelines list: 5 by default (the
+// header badge), up to 50 for the Pipelines tab.
+func pipelineLimit(c *gin.Context) int {
+	n, err := strconv.Atoi(c.Query("limit"))
+	if err != nil || n <= 0 {
+		return 5
+	}
+	if n > 50 {
+		return 50
+	}
+	return n
 }

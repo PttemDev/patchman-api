@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"time"
 
 	"patchman-be/internal/models"
@@ -18,6 +19,8 @@ import (
 type BucketInfo struct {
 	Name      string `json:"name"`
 	CreatedAt string `json:"createdAt,omitempty"`
+	// Prefix: the path a limited connection starts at ("" = the root).
+	Prefix string `json:"prefix,omitempty"`
 }
 
 // ObjectEntry is one row in a prefix listing — either a "folder"
@@ -50,15 +53,20 @@ type ObjectMeta struct {
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
-// Buckets lists all buckets on the connection.
+// Buckets lists all buckets on the connection — or just the one it is
+// limited to (options.bucket), without asking: such keys usually may not
+// list buckets.
 func (r *Registry) Buckets(ctx context.Context, conn models.S3Connection) ([]BucketInfo, error) {
+	if pin := conn.Pin(); pin.Bucket != "" {
+		return []BucketInfo{{Name: pin.Bucket, Prefix: pin.Prefix}}, nil
+	}
 	cl, err := r.client(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
 	out, err := cl.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
-		return nil, err
+		return nil, explainDenied(err, models.S3Pin{})
 	}
 	res := make([]BucketInfo, 0, len(out.Buckets))
 	for _, b := range out.Buckets {
@@ -96,6 +104,9 @@ func (r *Registry) ListObjects(ctx context.Context, conn models.S3Connection, bu
 	}
 	out, err := cl.ListObjectsV2(ctx, in)
 	if err != nil {
+		if pin := conn.Pin(); pin.Prefix != "" && bucket == pin.Bucket && !strings.HasPrefix(prefix, pin.Prefix) && strings.Contains(err.Error(), "AccessDenied") {
+			return nil, fmt.Errorf("%w — this connection is limited to %s/%s", err, pin.Bucket, pin.Prefix)
+		}
 		return nil, err
 	}
 	listing := &ObjectListing{Prefix: prefix, Objects: []ObjectEntry{}}

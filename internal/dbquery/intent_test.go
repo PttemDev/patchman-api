@@ -205,10 +205,12 @@ func TestIsWriteStatement(t *testing.T) {
 		{"mongo aggregate is not a write", "mongo", `db.x.aggregate([{$match:{a:1}},{$group:{_id:"$a"}}])`, false},
 		{"mongo aggregate $out is a write", "mongo", `db.x.aggregate([{$match:{}},{$out:"y"}])`, true},
 		{"mongo aggregate quoted $merge is a write", "mongo", `db.getSiblingDB('d').x.aggregate([{"$merge" : {into:"y"}}])`, true},
-		// Structural: multi-statement `;` is NOT a write — it must stay
-		// ValidateReadOnly's rejection so AllowWrite can never bypass it,
-		// even though the second statement is a drop().
-		{"mongo multi-statement is structural not write", "mongo", `db.x.find(); db.x.drop()`, false},
+		// A Mongo script runs in the JavaScript engine (mongo_shell.go), which
+		// refuses each write call at run time unless the caller may write — so
+		// statically it is not classified (TestLiveMongoScriptWriteGuard).
+		{"mongo script is checked at run time", "mongo", `db.x.find(); db.x.drop()`, false},
+		// A script with an unparseable call stays a structural error.
+		{"mongo script with garbage is structural not write", "mongo", `db.x.drop(); please find users`, false},
 		{"mongo garbage is structural not write", "mongo", `please find users`, false},
 	}
 	for _, c := range cases {

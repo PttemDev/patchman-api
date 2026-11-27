@@ -1,23 +1,15 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/creack/pty"
 	"github.com/gin-gonic/gin"
 	"k8s.io/client-go/tools/clientcmd"
 )
-
-// localShellChunk is the read buffer for the PTY→WS pump. Kept modest so a
-// burst of output is delivered as several small stdout frames rather than one
-// giant WriteJSON.
-const localShellChunk = 4096
 
 // LocalShell opens an interactive login shell ON THE USER'S OWN MACHINE with
 // KUBECONFIG pointed at the selected connection/context, so they run
@@ -124,110 +116,7 @@ func (h *K8sOpsHandler) LocalShell(c *gin.Context) {
 	// Audit the START before the long-lived stream (matches Exec).
 	h.audit(c, conn, role, "local_shell", contextName, "", "", nil)
 
-	wsConn, err := k8sExecUpgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		// gorilla already wrote the HTTP error; tear down the shell we started.
-		_ = ptmx.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return
-	}
-
-	// teardown runs exactly once: it closes the PTY master (which unblocks the
-	// PTY read pump with EOF), kills the child shell, and closes the socket.
-	var teardownOnce sync.Once
-	teardown := func() {
-		teardownOnce.Do(func() {
-			_ = ptmx.Close()
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			_ = wsConn.Close()
-		})
-	}
-	defer teardown()
-
-	writer := &wsWriter{conn: wsConn}
-	done := make(chan struct{}) // closed by the reader when the client goes away
-
-	// Read deadline + pong handler keep an idle shell alive across the sidecar
-	// proxy — identical tuning to Exec.
-	_ = wsConn.SetReadDeadline(time.Now().Add(execPongWait))
-	wsConn.SetPongHandler(func(string) error {
-		return wsConn.SetReadDeadline(time.Now().Add(execPongWait))
-	})
-
-	// Ping ticker (single-writer via the wsWriter mutex).
-	go func() {
-		t := time.NewTicker(execPingPeriod)
-		defer t.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-t.C:
-				if err := writer.ping(); err != nil {
-					return
-				}
-			}
-		}
-	}()
-
-	// Reader goroutine: WS frames → PTY. stdin bytes go to the master; resize
-	// retunes the window. Any read error (client closed / timeout) tears the
-	// session down, which unblocks the pump below.
-	go func() {
-		defer close(done)
-		defer teardown()
-		for {
-			_, msg, err := wsConn.ReadMessage()
-			if err != nil {
-				return
-			}
-			var in execInbound
-			if json.Unmarshal(msg, &in) != nil {
-				continue
-			}
-			switch in.Type {
-			case "stdin":
-				if _, werr := ptmx.Write([]byte(in.Data)); werr != nil {
-					return
-				}
-			case "resize":
-				_ = pty.Setsize(ptmx, &pty.Winsize{Rows: in.Rows, Cols: in.Cols})
-			}
-		}
-	}()
-
-	// PTY → WS {type:stdout} pump on this goroutine. Returns when the shell
-	// exits (EOF) or teardown closes the master.
-	buf := make([]byte, localShellChunk)
-	for {
-		n, rerr := ptmx.Read(buf)
-		if n > 0 {
-			if werr := writer.writeJSON(execOutbound{Type: "stdout", Data: string(buf[:n])}); werr != nil {
-				break
-			}
-		}
-		if rerr != nil {
-			break
-		}
-	}
-
-	// Tear down and reap the child so Wait() yields an exit status, then report
-	// it. If the client already disconnected the exit frame simply no-ops.
-	teardown()
-	waitErr := cmd.Wait()
-	out := execOutbound{Type: "exit", Code: 0}
-	if waitErr != nil {
-		out.Error = waitErr.Error()
-		if ee, okee := waitErr.(*exec.ExitError); okee {
-			out.Code = ee.ExitCode()
-		} else {
-			out.Code = 1
-		}
-	}
-	_ = writer.writeJSON(out)
+	bridgePTY(c, cmd, ptmx)
 }
 
 // firstExisting returns the first path that exists on disk, or "".

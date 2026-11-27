@@ -74,9 +74,14 @@ func (h *DefectHandler) Create(c *gin.Context) {
 		return
 	}
 
+	ws, ok := qaCreateWorkspace(h.db, c, userID)
+	if !ok {
+		return
+	}
 	defect := models.Defect{
 		ID:               newID,
 		UserID:           userID,
+		WorkspaceID:      ws,
 		Title:            input.Title,
 		Description:      input.Description,
 		Status:           status,
@@ -101,7 +106,10 @@ func (h *DefectHandler) Create(c *gin.Context) {
 func (h *DefectHandler) List(c *gin.Context) {
 	userID := c.GetString("userID")
 
-	query := h.db.Where("user_id = ?", userID)
+	query, ok := qaListScope(h.db, c, userID)
+	if !ok {
+		return
+	}
 
 	// Apply filters
 	if status := c.Query("status"); status != "" {
@@ -140,8 +148,7 @@ func (h *DefectHandler) Get(c *gin.Context) {
 	id := c.Param("id")
 
 	var defect models.Defect
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&defect).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Defect not found"})
+	if !qaLoad(h.db, c, userID, id, &defect, ViewerRole, "Defect not found") {
 		return
 	}
 
@@ -153,8 +160,7 @@ func (h *DefectHandler) Update(c *gin.Context) {
 	id := c.Param("id")
 
 	var defect models.Defect
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&defect).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Defect not found"})
+	if !qaLoad(h.db, c, userID, id, &defect, EditorRole, "Defect not found") {
 		return
 	}
 
@@ -213,8 +219,7 @@ func (h *DefectHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 
 	var defect models.Defect
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&defect).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Defect not found"})
+	if !qaLoad(h.db, c, userID, id, &defect, OwnerRole, "Defect not found") {
 		return
 	}
 

@@ -2,6 +2,8 @@ package dbquery
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -492,7 +494,9 @@ func bsonTypeName(v any) string {
 	case bson.A, []any:
 		return "array"
 	case bson.Binary:
-		return "binData"
+		return binaryDisplay(v.(bson.Binary)).kind
+	case mongoDisplay:
+		return v.(mongoDisplay).kind
 	case bson.ObjectID:
 		return "objectId"
 	case time.Time:
@@ -1250,7 +1254,7 @@ func parseJSONish(s string) (any, error) {
 	// (ObjectID, ISODate, NumberLong, ...) in addition to plain JSON.
 	// Allow single quotes by replacing them with double — best-effort
 	// for shell-y syntax.
-	cleaned := normalizeShellJSON(mongoRegexLiterals(s))
+	cleaned := normalizeShellJSON(mongoRegexLiterals(shellHelpersToExtJSON(s)))
 	var out any
 	if err := bson.UnmarshalExtJSON([]byte(cleaned), false, &out); err != nil {
 		// Fall back to plain JSON for the cases where ExtJSON is too
@@ -1260,6 +1264,35 @@ func parseJSONish(s string) (any, error) {
 		}
 	}
 	return out, nil
+}
+
+var (
+	shellUUIDRE    = regexp.MustCompile(`\bUUID\(\s*['"]([0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12})['"]\s*\)`)
+	shellOIDRE     = regexp.MustCompile(`\bObjectId\(\s*['"]([0-9a-fA-F]{24})['"]\s*\)`)
+	shellDateRE    = regexp.MustCompile(`\b(?:ISODate|new Date)\(\s*['"]([^'"]+)['"]\s*\)`)
+	shellLongRE    = regexp.MustCompile(`\bNumberLong\(\s*['"]?(-?\d+)['"]?\s*\)`)
+	shellDecimalRE = regexp.MustCompile(`\bNumberDecimal\(\s*['"]([^'"]+)['"]\s*\)`)
+	shellBinaryRE  = regexp.MustCompile(`\bBinary\.createFromBase64\(\s*['"]([A-Za-z0-9+/=]*)['"]\s*,\s*(\d+)\s*\)`)
+)
+
+// shellHelpersToExtJSON turns the shell helpers people paste from Compass or
+// mongosh — UUID('…'), ObjectId('…'), ISODate('…'), NumberLong, NumberDecimal,
+// Binary.createFromBase64 — into Extended JSON for the single-call parser.
+// (Anything it can't read stays as is; the JavaScript engine handles it.)
+func shellHelpersToExtJSON(s string) string {
+	s = shellUUIDRE.ReplaceAllStringFunc(s, func(m string) string {
+		raw, _ := hex.DecodeString(strings.ReplaceAll(shellUUIDRE.FindStringSubmatch(m)[1], "-", ""))
+		return `{"$binary":{"base64":"` + base64.StdEncoding.EncodeToString(raw) + `","subType":"04"}}`
+	})
+	s = shellOIDRE.ReplaceAllString(s, `{"$$oid":"$1"}`)
+	s = shellDateRE.ReplaceAllString(s, `{"$$date":"$1"}`)
+	s = shellLongRE.ReplaceAllString(s, `{"$$numberLong":"$1"}`)
+	s = shellDecimalRE.ReplaceAllString(s, `{"$$numberDecimal":"$1"}`)
+	return shellBinaryRE.ReplaceAllStringFunc(s, func(m string) string {
+		g := shellBinaryRE.FindStringSubmatch(m)
+		n, _ := strconv.Atoi(g[2])
+		return fmt.Sprintf(`{"$binary":{"base64":"%s","subType":"%02x"}}`, g[1], n)
+	})
 }
 
 // mongoRegexLiterals rewrites shell regex literals (/pattern/flags) in value
@@ -1548,8 +1581,36 @@ func plainValue(v any) any {
 			out[i] = plainValue(x)
 		}
 		return out
+	case bson.Binary:
+		return binaryDisplay(t)
 	}
 	return v
+}
+
+// mongoDisplay is a value shown the way mongosh / Compass write it, e.g.
+// UUID('daa33d29-…'). It encodes to JSON as that text, so the table, the
+// document view, copy and exports all show the same thing — and the text
+// pastes straight back into a query.
+type mongoDisplay struct {
+	kind string // column type: "uuid" / "binData"
+	text string
+}
+
+func (d mongoDisplay) MarshalJSON() ([]byte, error) { return json.Marshal(d.text) }
+
+// binaryDisplay: a standard UUID (subtype 4) as UUID('…'); any other binary,
+// including the legacy subtype 3 whose byte order depends on the driver that
+// wrote it, as Binary.createFromBase64('…', subtype) like Compass.
+func binaryDisplay(b bson.Binary) mongoDisplay {
+	if b.Subtype == 4 && len(b.Data) == 16 {
+		return mongoDisplay{kind: "uuid", text: "UUID('" + formatUUID(b.Data) + "')"}
+	}
+	return mongoDisplay{kind: "binData", text: fmt.Sprintf("Binary.createFromBase64('%s', %d)", base64.StdEncoding.EncodeToString(b.Data), b.Subtype)}
+}
+
+func formatUUID(b []byte) string {
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
 // parseIntArg trims a chain method arg and tries to read it as a

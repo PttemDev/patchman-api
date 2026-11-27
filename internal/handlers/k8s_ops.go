@@ -243,6 +243,33 @@ func (h *K8sOpsHandler) Related(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": rel})
 }
 
+// PodSiblings returns the pods sharing a pod's owner (same ReplicaSet /
+// Deployment / StatefulSet / DaemonSet / Job, else the same app label) for the
+// log viewer's pod switcher. Read-only, like Related.
+// GET /k8s/:id/pod-siblings?context=&namespace=&pod=
+func (h *K8sOpsHandler) PodSiblings(c *gin.Context) {
+	conn, role, ok := h.access(c, false)
+	if !ok {
+		return
+	}
+	contextName := c.Query("context")
+	namespace := c.Query("namespace")
+	pod := strings.TrimSpace(c.Query("pod"))
+	if pod == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pod is required"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	res, err := h.registry.PodSiblings(ctx, *conn, contextName, namespace, pod)
+	h.audit(c, conn, role, "pod_siblings", contextName, namespace, "pods/"+pod, err)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": res})
+}
+
 // Logs streams pod logs as Server-Sent Events. It mirrors sse.go: chunked
 // c.Writer + Flush, and clientGone (request-context cancellation) tears down the
 // upstream k8s stream so nothing leaks when the FE disconnects.

@@ -2,14 +2,12 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/creack/pty"
@@ -103,102 +101,7 @@ func (h *AIShellHandler) ClaudeShell(c *gin.Context) {
 		return
 	}
 
-	wsConn, err := k8sExecUpgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		_ = ptmx.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return
-	}
-
-	// teardown runs exactly once: close the PTY master (unblocks the read pump),
-	// kill the child, close the socket.
-	var teardownOnce sync.Once
-	teardown := func() {
-		teardownOnce.Do(func() {
-			_ = ptmx.Close()
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			_ = wsConn.Close()
-		})
-	}
-	defer teardown()
-
-	writer := &wsWriter{conn: wsConn}
-	done := make(chan struct{})
-
-	_ = wsConn.SetReadDeadline(time.Now().Add(execPongWait))
-	wsConn.SetPongHandler(func(string) error {
-		return wsConn.SetReadDeadline(time.Now().Add(execPongWait))
-	})
-
-	// Keepalive ping (single-writer via wsWriter mutex).
-	go func() {
-		t := time.NewTicker(execPingPeriod)
-		defer t.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-t.C:
-				if err := writer.ping(); err != nil {
-					return
-				}
-			}
-		}
-	}()
-
-	// Reader goroutine: WS frames → PTY (stdin + resize).
-	go func() {
-		defer close(done)
-		defer teardown()
-		for {
-			_, msg, rerr := wsConn.ReadMessage()
-			if rerr != nil {
-				return
-			}
-			var in execInbound
-			if json.Unmarshal(msg, &in) != nil {
-				continue
-			}
-			switch in.Type {
-			case "stdin":
-				if _, werr := ptmx.Write([]byte(in.Data)); werr != nil {
-					return
-				}
-			case "resize":
-				_ = pty.Setsize(ptmx, &pty.Winsize{Rows: in.Rows, Cols: in.Cols})
-			}
-		}
-	}()
-
-	// PTY → WS {type:stdout} pump. Returns on claude exit (EOF) or teardown.
-	buf := make([]byte, localShellChunk)
-	for {
-		n, rerr := ptmx.Read(buf)
-		if n > 0 {
-			if werr := writer.writeJSON(execOutbound{Type: "stdout", Data: string(buf[:n])}); werr != nil {
-				break
-			}
-		}
-		if rerr != nil {
-			break
-		}
-	}
-
-	teardown()
-	waitErr := cmd.Wait()
-	out := execOutbound{Type: "exit", Code: 0}
-	if waitErr != nil {
-		out.Error = waitErr.Error()
-		if ee, okee := waitErr.(*exec.ExitError); okee {
-			out.Code = ee.ExitCode()
-		} else {
-			out.Code = 1
-		}
-	}
-	_ = writer.writeJSON(out)
+	bridgePTY(c, cmd, ptmx)
 }
 
 // loginShell returns the user's $SHELL, falling back to common shells.

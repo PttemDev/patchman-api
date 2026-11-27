@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -154,7 +155,9 @@ func (r *Registry) presigner(ctx context.Context, conn models.S3Connection) (*s3
 	return s3.NewPresignClient(cl), nil
 }
 
-// Test lists buckets to confirm credentials + endpoint reachability.
+// Test confirms credentials + endpoint reachability: it lists buckets, or —
+// on a connection limited to a bucket / path — lists one key there (a key
+// with a path-based policy may not list buckets at all).
 func (r *Registry) Test(ctx context.Context, conn models.S3Connection) error {
 	rc, err := r.resolve(conn)
 	if err != nil {
@@ -164,8 +167,28 @@ func (r *Registry) Test(ctx context.Context, conn models.S3Connection) error {
 	if err != nil {
 		return err
 	}
+	if pin := conn.Pin(); pin.Bucket != "" {
+		in := &s3.ListObjectsV2Input{Bucket: &pin.Bucket, MaxKeys: awssdk.Int32(1), Delimiter: awssdk.String("/")}
+		if pin.Prefix != "" {
+			in.Prefix = &pin.Prefix
+		}
+		_, err = cl.ListObjectsV2(ctx, in)
+		return explainDenied(err, pin)
+	}
 	_, err = cl.ListBuckets(ctx, &s3.ListBucketsInput{})
-	return err
+	return explainDenied(err, models.S3Pin{})
+}
+
+// explainDenied adds what to do to an AccessDenied: a key limited to a path
+// needs the bucket (and path) set on the connection.
+func explainDenied(err error, pin models.S3Pin) error {
+	if err == nil || !strings.Contains(err.Error(), "AccessDenied") {
+		return err
+	}
+	if pin.Bucket == "" {
+		return fmt.Errorf("%w — this key may not list buckets: set the bucket (and the path it may use) in the connection's settings", err)
+	}
+	return fmt.Errorf("%w — check that the key may list %s/%s", err, pin.Bucket, pin.Prefix)
 }
 
 func (r *Registry) Close(connectionID string) {

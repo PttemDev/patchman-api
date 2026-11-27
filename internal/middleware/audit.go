@@ -58,7 +58,10 @@ var routeResource = map[string]string{
 	// Kubernetes tool (read-only explorer). Connection CRUD + read-only
 	// cluster ops audited under their own resource names.
 	"k8s-connections": "k8s_connection",
-	"k8s":             "k8s",
+	// Jira connection CRUD / test / grants (reads are GETs, audited in
+	// jira_activity_history instead).
+	"jira-connections": "jira_connection",
+	"k8s":              "k8s",
 	// Git tools (v1). Unlike the other tools, git nests its sub-resources
 	// under /git (e.g. /git/connections/:id, /git/repos/:repoId), so the
 	// nested "connections"/"repos" segments (git-only) map too — this lets

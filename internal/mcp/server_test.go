@@ -168,8 +168,8 @@ func TestListTools(t *testing.T) {
 	for _, tl := range res.Tools {
 		got[tl.Name] = true
 	}
-	if len(got) != 137 {
-		t.Errorf("tool count = %d, want 137", len(got))
+	if len(got) != 158 {
+		t.Errorf("tool count = %d, want 158", len(got))
 	}
 	for _, want := range []string{
 		"list_collections", "create_collection", "update_collection", "delete_collection",
@@ -183,7 +183,7 @@ func TestListTools(t *testing.T) {
 		// Execution + discovery surface.
 		"list_db_connections", "list_es_connections", "list_redis_connections",
 		"list_kafka_connections", "list_s3_connections", "list_k8s_connections", "list_grafana_connections",
-		"list_rabbitmq_connections",
+		"list_rabbitmq_connections", "list_jira_connections", "jira_search", "jira_issue",
 		"send_http_request", "run_db_query",
 		"es_cluster", "es_indices", "es_mapping", "es_request", "es_data_views", "es_data_view_search",
 		"redis_scan_keys", "redis_get", "redis_key_meta", "redis_command",

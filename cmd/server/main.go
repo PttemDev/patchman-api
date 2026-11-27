@@ -301,6 +301,9 @@ func main() {
 	publicCORSProxyHandler := handlers.NewCORSProxyHandler()
 	r.POST("/api/public/proxy/send", publicProxyHandler.Send)
 	r.POST("/api/public/cors-proxy", publicCORSProxyHandler.Proxy)
+	// CR + QA Hub GitLab webhook (per-link secret, no session).
+	qaWebhookH := handlers.NewQAWebhookHandler(db)
+	r.POST("/api/public/qa/webhooks/gitlab/:linkId", qaWebhookH.GitLab)
 
 	// No-account whiteboard links (no auth) — anyone with the token can view,
 	// and edit if the link's role is 'editor'. Gated entirely by the token.
@@ -546,6 +549,25 @@ func main() {
 
 	// Test-case folders (owner-only, like test cases) + move + "Run all".
 	testFolderHandler := handlers.NewTestCaseFolderHandler(db)
+	api.POST("/qa/move", handlers.NewQAWorkspaceHandler(db).Move)
+	qaLinkH := handlers.NewQALinkHandler(db)
+	api.GET("/qa/links", qaLinkH.List)
+	api.POST("/qa/links", qaLinkH.Create)
+	api.PUT("/qa/links/:id", qaLinkH.Update)
+	api.DELETE("/qa/links/:id", qaLinkH.Delete)
+	api.POST("/qa/links/:id/webhook", qaLinkH.CreateWebhookSecret)
+	qaAutoH := handlers.NewQAAutomationHandler(db)
+	api.GET("/qa/schedules", qaAutoH.ListSchedules)
+	api.POST("/qa/schedules", qaAutoH.CreateSchedule)
+	api.PUT("/qa/schedules/:id", qaAutoH.UpdateSchedule)
+	api.DELETE("/qa/schedules/:id", qaAutoH.DeleteSchedule)
+	api.POST("/qa/schedules/:id/run", qaAutoH.RunScheduleNow)
+	api.GET("/qa/reports", qaAutoH.Reports)
+	qaSetH := handlers.NewQASettingsHandler(db)
+	api.GET("/qa/settings", qaSetH.Get)
+	api.PUT("/qa/settings", qaSetH.Put)
+	api.POST("/qa/inbox/snooze", qaSetH.Snooze)
+	api.DELETE("/qa/inbox/snooze", qaSetH.Unsnooze)
 	api.GET("/test-folders", testFolderHandler.List)
 	api.POST("/test-folders", testFolderHandler.Create)
 	api.PUT("/test-folders/:id", testFolderHandler.Rename)
@@ -1062,6 +1084,28 @@ func main() {
 			api.POST("/graylog/:id/search", graylogOpsH.Search)
 			api.GET("/graylog/:id/views", graylogOpsH.Views)
 
+			// Jira (CR_QA_P0_PLAN.md P0.b / O1) — read-only: Cloud (email +
+			// API token) or Data Center (PAT). Dual-written like the other
+			// tools; reads go through loadAccessible + grants.
+			jiraConnH := handlers.NewJiraConnectionHandler(db, dbCipher)
+			jiraGrantH := handlers.NewJiraGrantHandler(db, jiraConnH)
+			api.POST("/jira-connections", jiraConnH.Create)
+			api.GET("/jira-connections", jiraConnH.List)
+			api.GET("/jira-connections/:id", jiraConnH.Get)
+			api.PATCH("/jira-connections/:id", jiraConnH.Update)
+			api.DELETE("/jira-connections/:id", jiraConnH.Delete)
+			api.POST("/jira-connections/:id/test", jiraConnH.Test)
+			api.POST("/jira-connections/test", jiraConnH.Test)
+			api.POST("/jira-connections/:id/reveal-secret", jiraConnH.RevealSecret)
+			api.GET("/jira-connections/:id/grants", jiraGrantH.List)
+			api.POST("/jira-connections/:id/grants", jiraGrantH.Add)
+			api.DELETE("/jira-connections/:id/grants/:grantId", jiraGrantH.Delete)
+			api.GET("/jira-connections/:id/fields", jiraConnH.Fields)
+			api.GET("/jira-connections/:id/projects", jiraConnH.Projects)
+			api.GET("/jira-connections/:id/search", jiraConnH.Search)
+			api.GET("/jira-connections/:id/issues", jiraConnH.Search) // CR_QA_P0_PLAN.md name
+			api.GET("/jira-connections/:id/issue/:key", jiraConnH.Issue)
+
 			// Kubernetes tool (read-only explorer, v1). Connection CRUD +
 			// delegated grants + activity audit ride the same spine as the
 			// other tools; live cluster ops are READ ONLY — contexts (no
@@ -1127,6 +1171,7 @@ func main() {
 			api.GET("/k8s/:id/resources", k8sOpsH.Resources)
 			api.GET("/k8s/:id/resource", k8sOpsH.Resource)
 			api.GET("/k8s/:id/related", k8sOpsH.Related)
+			api.GET("/k8s/:id/pod-siblings", k8sOpsH.PodSiblings)
 			api.GET("/k8s/:id/logs", k8sOpsH.Logs)
 			api.GET("/k8s/:id/watch", k8sOpsH.Watch)
 			api.GET("/k8s/:id/overview", k8sOpsH.Overview)
@@ -1238,6 +1283,16 @@ func main() {
 			gitGroup.GET("/connections/:id/merge_request_approvals", gitRemoteH.MRApprovals)
 			gitGroup.GET("/connections/:id/merge_request_pipelines", gitRemoteH.MRPipelines)
 			gitGroup.GET("/connections/:id/project_members", gitRemoteH.ProjectMembers)
+			// MR page parity: comment edit/delete, commits, cancel auto-merge,
+			// emoji awards, label / milestone pickers.
+			gitGroup.POST("/connections/:id/merge_request_note_update", gitRemoteH.UpdateMRNote)
+			gitGroup.POST("/connections/:id/merge_request_note_delete", gitRemoteH.DeleteMRNote)
+			gitGroup.GET("/connections/:id/merge_request_commits", gitRemoteH.MRCommits)
+			gitGroup.POST("/connections/:id/merge_request_cancel_auto_merge", gitRemoteH.CancelAutoMergeMR)
+			gitGroup.GET("/connections/:id/merge_request_awards", gitRemoteH.MRAwards)
+			gitGroup.POST("/connections/:id/merge_request_award", gitRemoteH.ToggleMRAward)
+			gitGroup.GET("/connections/:id/project_labels", gitRemoteH.ProjectLabels)
+			gitGroup.GET("/connections/:id/project_milestones", gitRemoteH.ProjectMilestones)
 			// CI/CD: pipelines, jobs, logs, schedules, variables (read —
 			// variables need a write grant), run / retry / cancel / play (write).
 			gitGroup.GET("/connections/:id/pipelines", gitRemoteH.Pipelines)
@@ -1304,6 +1359,47 @@ func main() {
 			gitGroup.GET("/repos/:repoId/grep", gitOps.Grep)
 			gitGroup.GET("/repos/:repoId/files", gitOps.Files)
 			gitGroup.GET("/repos/:repoId/symbols", gitOps.Symbols)
+
+			// CR + QA Hub MR Radar / Inbox (CR_QA_P0_PLAN P0.c): needs the
+			// Git and Jira connection handlers, so it lives with them.
+			qaRadarH := handlers.NewQARadarHandler(db, gitRemoteH, jiraConnH)
+			api.GET("/qa/radar", qaRadarH.Radar)
+			api.GET("/qa/inbox", qaRadarH.Inbox)
+			api.PUT("/qa/links/:id/mine", qaRadarH.PutMine)
+			api.POST("/qa/links/:id/webhook/install", qaRadarH.InstallWebhook)
+			api.POST("/qa/links/:id/webhook/setup", qaRadarH.SetupWebhook)
+			qaPropH := handlers.NewQAProposalHandler(db, dbCipher)
+			api.GET("/qa/proposals", qaPropH.List)
+			api.POST("/qa/proposals", qaPropH.Create)
+			api.GET("/qa/proposals/:id/request", qaPropH.Request)
+			api.POST("/qa/proposals/:id/resolve", qaPropH.Resolve)
+			api.GET("/qa/agent-setup-policy", qaPropH.GetAgentPolicy)
+			api.PUT("/qa/agent-setup-policy", qaPropH.PutAgentPolicy)
+			api.GET("/qa/review-queue", qaRadarH.ReviewQueue)
+			api.POST("/qa/reviews/claim", qaRadarH.Claim)
+			api.GET("/qa/mr-context", qaRadarH.MRContext)
+			api.GET("/qa/reviews", qaRadarH.ListReviews)
+			api.GET("/qa/reviews/:id", qaRadarH.GetReview)
+			api.POST("/qa/reviews/:id/submit", qaRadarH.Submit)
+			api.PATCH("/qa/reviews/:id/findings/:fid", qaRadarH.Decide)
+			api.POST("/qa/reviews/:id/discard", qaRadarH.Discard)
+			api.POST("/qa/reviews/:id/post", qaRadarH.Post)
+			api.GET("/qa/verify-context", qaRadarH.VerifyContext)
+			api.GET("/qa/verifications", qaRadarH.ListVerifications)
+			api.POST("/qa/verifications/:id/submit", qaRadarH.SubmitVerification)
+			api.POST("/qa/verifications/:id/apply", qaRadarH.ApplyVerification)
+			api.GET("/qa/mr-tests", qaRadarH.MRTests)
+			api.POST("/qa/mr-tests/run", qaRadarH.RunMRTests)
+			api.POST("/qa/mr-tests/post", qaRadarH.PostMRTestResults)
+			api.POST("/qa/defects/:id/jira", qaRadarH.DefectToJira)
+			qaChannels := handlers.NewQAChannels(db, dbCipher)
+			qaWebhookH.SetChannels(qaChannels)
+			qaAutoH.SetChannels(qaChannels)
+			api.GET("/qa/channels", qaChannels.List)
+			api.POST("/qa/channels", qaChannels.Create)
+			api.PUT("/qa/channels/:id", qaChannels.Update)
+			api.DELETE("/qa/channels/:id", qaChannels.Delete)
+			api.POST("/qa/channels/:id/test", qaChannels.Test)
 		}
 	}
 
@@ -1318,6 +1414,14 @@ func main() {
 	api.GET("/mcp/tokens", mcpTokenH.List)
 	api.PATCH("/mcp/tokens/:id", mcpTokenH.UpdateScopes)
 	api.DELETE("/mcp/tokens/:id", mcpTokenH.Delete)
+
+	// Desktop terminal — plain login-shell PTYs, one WebSocket per tab. Desktop
+	// only (the handler 403s on a hosted BE); registered outside the cipher-gated
+	// blocks since it needs no secrets. WebSocket, OUR stdin/stdout framing.
+	terminalH := handlers.NewTerminalHandler(cfg.IsEmbedded())
+	api.GET("/terminal/status", terminalH.Status)
+	api.GET("/terminal/shell", terminalH.Shell)
+	api.GET("/terminal/history", terminalH.History)
 
 	// Local (this-device) MCP discovery status for the desktop FE's "Local"
 	// card. Embedded-only: the hosted server has no discovery file and no
@@ -1538,6 +1642,9 @@ func main() {
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 	})
+
+	// CR + QA scheduled test runs and channel digests (non-LLM jobs).
+	qaAutoH.Start()
 
 	addr := cfg.Listen()
 	// Bind explicitly BEFORE writing the discovery file so there is no

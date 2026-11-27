@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"patchman-be/internal/models"
 
@@ -24,6 +25,8 @@ type createTestCaseInput struct {
 	Priority    string `json:"priority"`
 	Type        string `json:"type"`
 	Tags        string `json:"tags"`
+	JiraKey     string `json:"jiraKey"`
+	MRRef       string `json:"mrRef"`
 	Steps       string `json:"steps"`
 	Status      string `json:"status"`
 	// FolderID optionally files the new case in a folder (null/"" = root).
@@ -36,6 +39,8 @@ type updateTestCaseInput struct {
 	Priority    *string `json:"priority"`
 	Type        *string `json:"type"`
 	Tags        *string `json:"tags"`
+	JiraKey     *string `json:"jiraKey"`
+	MRRef       *string `json:"mrRef"`
 	Steps       *string `json:"steps"`
 	Status      *string `json:"status"`
 }
@@ -43,7 +48,10 @@ type updateTestCaseInput struct {
 func (h *TestCaseHandler) List(c *gin.Context) {
 	userID := c.GetString("userID")
 
-	query := h.db.Where("user_id = ?", userID)
+	query, ok := qaListScope(h.db, c, userID)
+	if !ok {
+		return
+	}
 
 	// Apply filters
 	if priority := c.Query("priority"); priority != "" {
@@ -91,8 +99,12 @@ func (h *TestCaseHandler) Create(c *gin.Context) {
 	}
 
 	folderID := emptyToNil(input.FolderID)
+	ws, ok := qaCreateWorkspace(h.db, c, userID)
+	if !ok {
+		return
+	}
 	if folderID != nil {
-		if _, ok := ownedFolder(h.db, userID, *folderID); !ok {
+		if f, ok := ownedFolder(h.db, userID, *folderID); !ok || !sameQAScope(f, models.TestCase{UserID: userID, WorkspaceID: ws}) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Folder not found"})
 			return
 		}
@@ -101,6 +113,7 @@ func (h *TestCaseHandler) Create(c *gin.Context) {
 	tc := models.TestCase{
 		ID:          newID,
 		UserID:      userID,
+		WorkspaceID: ws,
 		FolderID:    folderID,
 		Title:       input.Title,
 		Description: input.Description,
@@ -109,6 +122,8 @@ func (h *TestCaseHandler) Create(c *gin.Context) {
 		Tags:        normalizeTestCaseTags(input.Tags),
 		Steps:       normalizeTestCaseSteps(input.Steps),
 		Status:      status,
+		JiraKey:     strings.ToUpper(strings.TrimSpace(input.JiraKey)),
+		MRRef:       strings.TrimSpace(input.MRRef),
 	}
 
 	if err := h.db.Create(&tc).Error; err != nil {
@@ -124,8 +139,7 @@ func (h *TestCaseHandler) Get(c *gin.Context) {
 	id := c.Param("id")
 
 	var tc models.TestCase
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&tc).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test case not found"})
+	if !qaLoad(h.db, c, userID, id, &tc, ViewerRole, "Test case not found") {
 		return
 	}
 
@@ -137,8 +151,7 @@ func (h *TestCaseHandler) Update(c *gin.Context) {
 	id := c.Param("id")
 
 	var tc models.TestCase
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&tc).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test case not found"})
+	if !qaLoad(h.db, c, userID, id, &tc, EditorRole, "Test case not found") {
 		return
 	}
 
@@ -168,6 +181,12 @@ func (h *TestCaseHandler) Update(c *gin.Context) {
 	if input.Type != nil {
 		updates["type"] = normalizeTestCaseType(*input.Type)
 	}
+	if input.JiraKey != nil {
+		updates["jira_key"] = strings.ToUpper(strings.TrimSpace(*input.JiraKey))
+	}
+	if input.MRRef != nil {
+		updates["mr_ref"] = strings.TrimSpace(*input.MRRef)
+	}
 	if input.Tags != nil {
 		updates["tags"] = normalizeTestCaseTags(*input.Tags)
 	}
@@ -192,8 +211,7 @@ func (h *TestCaseHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 
 	var tc models.TestCase
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&tc).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test case not found"})
+	if !qaLoad(h.db, c, userID, id, &tc, OwnerRole, "Test case not found") {
 		return
 	}
 

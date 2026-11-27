@@ -23,7 +23,7 @@ serves `/api/mcp` per user and token, and the desktop app serves the same tools 
    whether it only reads. Append `connNote` for connection tools.
 3. **Annotate it** in `internal/mcp/annotations.go` (`readRemote`, destructive, …).
    `TestEveryToolAnnotated` fails otherwise.
-4. **Update the tool count** in `server_test.go` (currently 137) and add the name to the expected-tools
+4. **Update the tool count** in `server_test.go` (currently 158) and add the name to the expected-tools
    list there.
 5. **Keep the reply small.** Return what an agent needs, not the raw upstream payload:
    - `compactServiceMap` turns a graph into lines.

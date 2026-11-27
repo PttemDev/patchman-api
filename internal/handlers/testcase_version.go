@@ -26,8 +26,7 @@ func (h *TestCaseVersionHandler) ListVersions(c *gin.Context) {
 
 	// Verify the test case belongs to the user
 	var tc models.TestCase
-	if err := h.db.Where("id = ? AND user_id = ?", testCaseID, userID).First(&tc).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test case not found"})
+	if !qaLoad(h.db, c, userID, testCaseID, &tc, ViewerRole, "Test case not found") {
 		return
 	}
 
@@ -51,8 +50,7 @@ func (h *TestCaseVersionHandler) GetVersion(c *gin.Context) {
 
 	// Verify the test case belongs to the user
 	var tc models.TestCase
-	if err := h.db.Where("id = ? AND user_id = ?", testCaseID, userID).First(&tc).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test case not found"})
+	if !qaLoad(h.db, c, userID, testCaseID, &tc, ViewerRole, "Test case not found") {
 		return
 	}
 
@@ -75,8 +73,7 @@ func (h *TestCaseVersionHandler) RestoreVersion(c *gin.Context) {
 
 	// Verify the test case belongs to the user
 	var tc models.TestCase
-	if err := h.db.Where("id = ? AND user_id = ?", testCaseID, userID).First(&tc).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test case not found"})
+	if !qaLoad(h.db, c, userID, testCaseID, &tc, EditorRole, "Test case not found") {
 		return
 	}
 

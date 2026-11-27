@@ -5,16 +5,19 @@ import (
 )
 
 type Requirement struct {
-	ID          string    `gorm:"type:varchar(36);primaryKey" json:"id"`
-	UserID      string    `gorm:"type:varchar(36);index;not null" json:"userId"`
+	ID     string `gorm:"type:varchar(36);primaryKey" json:"id"`
+	UserID string `gorm:"type:varchar(36);index;not null" json:"userId"`
+	// WorkspaceID shares the row with a workspace's team (CR_QA_RFC O5);
+	// nil = personal, which is every row created before it existed.
+	WorkspaceID *string   `gorm:"type:varchar(36);index" json:"workspaceId,omitempty"`
 	Title       string    `gorm:"type:varchar(500);not null" json:"title"`
 	Description string    `gorm:"type:text" json:"description"`
-	Type        string    `gorm:"type:varchar(20);default:'functional'" json:"type"`    // functional, non_functional, user_story, epic
-	Priority    string    `gorm:"type:varchar(10);default:'medium'" json:"priority"`    // critical, high, medium, low
-	Status      string    `gorm:"type:varchar(20);default:'draft'" json:"status"`       // draft, approved, implemented, deprecated
-	ParentID    *string   `gorm:"type:varchar(36)" json:"parentId"`                     // Self-referencing for hierarchy
-	ExternalRef string    `gorm:"type:varchar(255)" json:"externalRef"`                 // Jira/Linear reference
-	Tags        string    `gorm:"type:text" json:"tags"`                                // JSON array
+	Type        string    `gorm:"type:varchar(20);default:'functional'" json:"type"` // functional, non_functional, user_story, epic
+	Priority    string    `gorm:"type:varchar(10);default:'medium'" json:"priority"` // critical, high, medium, low
+	Status      string    `gorm:"type:varchar(20);default:'draft'" json:"status"`    // draft, approved, implemented, deprecated
+	ParentID    *string   `gorm:"type:varchar(36)" json:"parentId"`                  // Self-referencing for hierarchy
+	ExternalRef string    `gorm:"type:varchar(255)" json:"externalRef"`              // Jira/Linear reference
+	Tags        string    `gorm:"type:text" json:"tags"`                             // JSON array
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
@@ -25,3 +28,6 @@ type RequirementCoverage struct {
 	TestCaseID    string    `gorm:"type:varchar(36);index;not null" json:"testCaseId"`
 	CreatedAt     time.Time `json:"createdAt"`
 }
+
+// QAOwner: who owns the row and which workspace shares it (handlers/qa_access.go).
+func (r Requirement) QAOwner() (string, *string) { return r.UserID, r.WorkspaceID }

@@ -1,0 +1,10 @@
+# Patchman terminal: load the user's own startup files as if ZDOTDIR were
+# theirs (see internal/handlers/terminal.go).
+PATCHMAN_ZDOTDIR=$ZDOTDIR
+ZDOTDIR=$PATCHMAN_USER_ZDOTDIR
+if [[ -f $ZDOTDIR/.zshenv ]]; then source "$ZDOTDIR/.zshenv"; fi
+if [[ $ZDOTDIR != $PATCHMAN_USER_ZDOTDIR ]]; then   # their .zshenv moved ZDOTDIR
+  PATCHMAN_USER_ZDOTDIR=$ZDOTDIR
+  unset PATCHMAN_ZDOTDIR_UNSET
+fi
+ZDOTDIR=$PATCHMAN_ZDOTDIR

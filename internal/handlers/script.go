@@ -21,9 +21,9 @@ func NewScriptHandler(db *gorm.DB) *ScriptHandler {
 
 // executeScriptInput is the JSON body for POST /api/script/execute.
 type executeScriptInput struct {
-	Script  string              `json:"script" binding:"required"`
-	Type    string              `json:"type" binding:"required,oneof=pre-request test"`
-	Context scriptContextInput  `json:"context"`
+	Script  string             `json:"script" binding:"required"`
+	Type    string             `json:"type" binding:"required,oneof=pre-request test"`
+	Context scriptContextInput `json:"context"`
 }
 
 // scriptContextInput holds the request/response context passed from the frontend.
@@ -41,12 +41,16 @@ type scriptContextInput struct {
 
 // executeScriptOutput is the JSON response from POST /api/script/execute.
 type executeScriptOutput struct {
-	ConsoleOutput  []string            `json:"consoleOutput"`
+	ConsoleOutput  []string              `json:"consoleOutput"`
 	TestResults    []services.TestResult `json:"testResults"`
-	UpdatedEnvVars map[string]string   `json:"updatedEnvVars"`
-	Error          string              `json:"error,omitempty"`
+	UpdatedEnvVars map[string]string     `json:"updatedEnvVars"`
+	Error          string                `json:"error,omitempty"`
 	// For pre-request scripts, return potentially modified request fields
 	UpdatedHeaders map[string]string `json:"updatedHeaders,omitempty"`
+	// Only what the script changed: apply these over the request built after
+	// the script ran (updatedHeaders is every header, kept for older clients).
+	SetHeaders     map[string]string `json:"setHeaders"`
+	RemovedHeaders []string          `json:"removedHeaders"`
 }
 
 // Execute runs a JavaScript script with a Postman-compatible pm.* API.
@@ -96,6 +100,14 @@ func (h *ScriptHandler) Execute(c *gin.Context) {
 		TestResults:    ctx.TestResults,
 		UpdatedEnvVars: ctx.EnvVars,
 		UpdatedHeaders: ctx.Headers,
+		SetHeaders:     ctx.SetHeaders,
+		RemovedHeaders: ctx.RemovedHeaders,
+	}
+	if output.SetHeaders == nil {
+		output.SetHeaders = map[string]string{}
+	}
+	if output.RemovedHeaders == nil {
+		output.RemovedHeaders = []string{}
 	}
 
 	// Ensure non-nil slices for clean JSON

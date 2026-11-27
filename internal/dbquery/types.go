@@ -99,6 +99,9 @@ type ExecOpts struct {
 	// has already checked the connection's read-write switch and role).
 	// BigQuery re-checks it against the dry run's statement type.
 	AllowWrite bool
+	// WriteDenied explains why a write is refused when AllowWrite is false
+	// (Mongo scripts check writes while they run).
+	WriteDenied string
 }
 
 // Cursor walks the result set lazily so a SELECT * over a 10M row table

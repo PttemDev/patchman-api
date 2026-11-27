@@ -1,0 +1,7 @@
+ZDOTDIR=$PATCHMAN_USER_ZDOTDIR
+# /etc/zshrc ran while ZDOTDIR was ours, so its default HISTFILE points there.
+[[ $HISTFILE == $PATCHMAN_ZDOTDIR/* ]] && HISTFILE=$ZDOTDIR/${HISTFILE:t}
+if [[ -f $ZDOTDIR/.zshrc ]]; then source "$ZDOTDIR/.zshrc"; fi
+source "$PATCHMAN_ZDOTDIR/pm-session.zsh"
+source "$PATCHMAN_ZDOTDIR/pm-ghost.zsh"
+if [[ -o login ]]; then ZDOTDIR=$PATCHMAN_ZDOTDIR; fi   # .zlogin is still to come

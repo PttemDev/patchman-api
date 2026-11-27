@@ -105,12 +105,18 @@ const (
 // cloudOrLocal routes a call to the hosted BE (as the signed-in user) when this
 // embedded backend holds a live cloud session, else runs it in-process as the
 // local user. Used by:
+//
 //   - the whiteboard tools, so an AI on the desktop's local MCP acts on the
 //     account the user is actually looking at (not the invisible on-device
 //     store) — see WHITEBOARD_UNIFIED_LOCAL_RFC.md;
+//
 //   - the git tools, because GitLab auth is the CALLER's linked GitLab account,
 //     which lives on the hosted BE (the FE pins git remote reads to 'remote'
 //     for the same reason); locally the embedded local-user has no link → 412.
+//
+//   - the CR + QA tools (qa_*, jira_projects, jira_connection_create) and the
+//     test case / folder tools: the Hub reads QA data from the hosted BE, so a
+//     link, review or drafted test made through the local MCP must land there.
 //
 // Every other tool stays local by design — executions run against
 // dual-written / LAN connections and must not go to the cloud. The cloud
@@ -330,6 +336,16 @@ func BuildServerFor(engine *gin.Engine, jwtSecret, userID string, scopes mcpscop
 	}
 	if scopes.Allows(mcpscope.GroupGCP) {
 		registerGCPTools(s, c)
+	}
+	if scopes.Allows(mcpscope.GroupJira) {
+		registerJiraTools(s, c)
+	}
+	// The radar reads Git (and Jira) for QA: needs both groups.
+	if scopes.Allows(mcpscope.GroupTestCases) && scopes.Allows(mcpscope.GroupGit) {
+		registerQARadarTools(s, c, scopes.Allows(mcpscope.GroupJira))
+		registerQAReviewTools(s, c, scopes.Allows(mcpscope.GroupJira))
+		registerQASetupTools(s, c, scopes.Allows(mcpscope.GroupJira))
+		registerQAVerifyTools(s, c)
 	}
 	if PluginTools != nil {
 		PluginTools(s, c.callCtx, scopes.Allows)

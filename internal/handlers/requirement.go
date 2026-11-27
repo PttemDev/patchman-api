@@ -49,7 +49,10 @@ type linkTestCaseInput struct {
 func (h *RequirementHandler) List(c *gin.Context) {
 	userID := c.GetString("userID")
 
-	query := h.db.Where("user_id = ?", userID)
+	query, ok := qaListScope(h.db, c, userID)
+	if !ok {
+		return
+	}
 
 	// Apply filters
 	if reqType := c.Query("type"); reqType != "" {
@@ -102,9 +105,14 @@ func (h *RequirementHandler) Create(c *gin.Context) {
 		return
 	}
 
+	ws, ok := qaCreateWorkspace(h.db, c, userID)
+	if !ok {
+		return
+	}
 	req := models.Requirement{
 		ID:          newID,
 		UserID:      userID,
+		WorkspaceID: ws,
 		Title:       input.Title,
 		Description: input.Description,
 		Type:        reqType,
@@ -128,8 +136,7 @@ func (h *RequirementHandler) Get(c *gin.Context) {
 	id := c.Param("id")
 
 	var req models.Requirement
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&req).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Requirement not found"})
+	if !qaLoad(h.db, c, userID, id, &req, ViewerRole, "Requirement not found") {
 		return
 	}
 
@@ -141,8 +148,7 @@ func (h *RequirementHandler) Update(c *gin.Context) {
 	id := c.Param("id")
 
 	var req models.Requirement
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&req).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Requirement not found"})
+	if !qaLoad(h.db, c, userID, id, &req, EditorRole, "Requirement not found") {
 		return
 	}
 
@@ -192,8 +198,7 @@ func (h *RequirementHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 
 	var req models.Requirement
-	if err := h.db.Where("id = ? AND user_id = ?", id, userID).First(&req).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Requirement not found"})
+	if !qaLoad(h.db, c, userID, id, &req, OwnerRole, "Requirement not found") {
 		return
 	}
 
@@ -216,8 +221,7 @@ func (h *RequirementHandler) LinkTestCase(c *gin.Context) {
 
 	// Verify requirement belongs to user
 	var req models.Requirement
-	if err := h.db.Where("id = ? AND user_id = ?", requirementID, userID).First(&req).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Requirement not found"})
+	if !qaLoad(h.db, c, userID, requirementID, &req, EditorRole, "Requirement not found") {
 		return
 	}
 
@@ -229,8 +233,7 @@ func (h *RequirementHandler) LinkTestCase(c *gin.Context) {
 
 	// Verify test case belongs to user
 	var tc models.TestCase
-	if err := h.db.Where("id = ? AND user_id = ?", input.TestCaseID, userID).First(&tc).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Test case not found"})
+	if !qaLoad(h.db, c, userID, input.TestCaseID, &tc, ViewerRole, "Test case not found") {
 		return
 	}
 
@@ -264,8 +267,7 @@ func (h *RequirementHandler) UnlinkTestCase(c *gin.Context) {
 
 	// Verify requirement belongs to user
 	var req models.Requirement
-	if err := h.db.Where("id = ? AND user_id = ?", requirementID, userID).First(&req).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Requirement not found"})
+	if !qaLoad(h.db, c, userID, requirementID, &req, EditorRole, "Requirement not found") {
 		return
 	}
 
@@ -303,7 +305,11 @@ func (h *RequirementHandler) GetTraceabilityMatrix(c *gin.Context) {
 
 	// Fetch all requirements for the user
 	var requirements []models.Requirement
-	if err := h.db.Where("user_id = ?", userID).Order("created_at DESC").Find(&requirements).Error; err != nil {
+	scope, ok := qaListScope(h.db, c, userID)
+	if !ok {
+		return
+	}
+	if err := scope.Order("created_at DESC").Find(&requirements).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch requirements"})
 		return
 	}
@@ -346,7 +352,8 @@ func (h *RequirementHandler) GetTraceabilityMatrix(c *gin.Context) {
 	// We look at all completed test runs and collect the most recent result for each test case.
 	latestStatus := map[string]string{} // testCaseID -> status
 	var runs []models.TestRun
-	h.db.Where("user_id = ? AND status = ?", userID, "completed").
+	runScope, _ := qaListScope(h.db, c, userID)
+	runScope.Where("status = ?", "completed").
 		Order("created_at DESC").
 		Find(&runs)
 

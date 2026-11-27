@@ -60,8 +60,8 @@ func fakeGitHubPR(t *testing.T) (*httptest.Server, func() []ghCall) {
 			q, _ := body["query"].(string)
 			switch {
 			case strings.Contains(q, "reviewThreads"):
-				_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"PRRT_1","isResolved":false,"path":"x.go","line":7,"originalLine":7,"diffSide":"RIGHT","comments":{"nodes":[{"databaseId":55,"body":"nit","createdAt":"2026-11-18T11:00:00Z","author":{"login":"ada"}}]}},{"id":"PRRT_2","isResolved":true,"path":"y.go","line":null,"originalLine":3,"diffSide":"LEFT","comments":{"nodes":[{"databaseId":56,"body":"old","createdAt":"2026-11-18T11:00:00Z","author":null}]}}]}}}}}`))
-			case strings.Contains(q, "convertPullRequestToDraft"), strings.Contains(q, "resolveReviewThread"), strings.Contains(q, "enablePullRequestAutoMerge"), strings.Contains(q, "updatePullRequestBranch"):
+				_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"PRRT_1","isResolved":false,"path":"x.go","line":7,"originalLine":7,"diffSide":"RIGHT","comments":{"nodes":[{"databaseId":55,"body":"nit","createdAt":"2026-11-18T11:00:00Z","author":{"login":"ada"}},{"databaseId":57,"body":"mine","createdAt":"2026-11-18T11:05:00Z","lastEditedAt":"2026-11-18T11:06:00Z","viewerCanUpdate":true,"author":{"login":"octo"}}]}},{"id":"PRRT_2","isResolved":true,"path":"y.go","line":null,"originalLine":3,"diffSide":"LEFT","comments":{"nodes":[{"databaseId":56,"body":"old","createdAt":"2026-11-18T11:00:00Z","author":null}]}}]}}}}}`))
+			case strings.Contains(q, "convertPullRequestToDraft"), strings.Contains(q, "resolveReviewThread"), strings.Contains(q, "enablePullRequestAutoMerge"), strings.Contains(q, "updatePullRequestBranch"), strings.Contains(q, "disablePullRequestAutoMerge"):
 				_, _ = w.Write([]byte(`{"data":{}}`))
 			case strings.Contains(q, "addPullRequestReviewThreadReply"):
 				_, _ = w.Write([]byte(`{"data":{"addPullRequestReviewThreadReply":{"comment":{"databaseId":77}}}}`))
@@ -95,7 +95,7 @@ func fakeGitHubPR(t *testing.T) (*httptest.Server, func() []ghCall) {
 				_, _ = w.Write([]byte(`{"id":900}`))
 				return
 			}
-			_, _ = w.Write([]byte(`[{"id":91,"body":"looks good","created_at":"2026-11-18T09:00:00Z","user":{"login":"ada"}}]`))
+			_, _ = w.Write([]byte(`[{"id":91,"body":"looks good","created_at":"2026-11-18T09:00:00Z","user":{"login":"ada"}},{"id":92,"body":"from me","created_at":"2026-11-18T09:30:00Z","updated_at":"2026-11-18T09:31:00Z","user":{"login":"octo"}}]`))
 		case p == "/repos/acme/api/pulls/1/reviews":
 			if r.Method == "POST" {
 				_, _ = w.Write([]byte(`{"id":300,"state":"APPROVED"}`))
@@ -117,6 +117,28 @@ func fakeGitHubPR(t *testing.T) (*httptest.Server, func() []ghCall) {
 		case p == "/repos/acme/api/collaborators":
 			_, _ = w.Write([]byte(`[{"id":2,"login":"octo"},{"id":7,"login":"ada"}]`))
 		case p == "/repos/acme/api/pulls/5/requested_reviewers":
+			_, _ = w.Write([]byte(`{}`))
+		case p == "/repos/acme/api/issues/comments/91", p == "/repos/acme/api/pulls/comments/55":
+			if r.Method == "DELETE" {
+				w.WriteHeader(204)
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":91}`))
+		case p == "/repos/acme/api/pulls/1/commits":
+			_, _ = w.Write([]byte(`[{"sha":"c1aaaaaaaaaa","commit":{"message":"first\n\nbody","author":{"name":"Ada"}}},{"sha":"c2bbbbbbbbbb","commit":{"message":"second","author":{"name":"Ada"}}}]`))
+		case p == "/repos/acme/api/issues/1/reactions":
+			if r.Method == "POST" {
+				_, _ = w.Write([]byte(`{"id":71}`))
+				return
+			}
+			_, _ = w.Write([]byte(`[{"id":70,"content":"+1","user":{"login":"octo"}},{"id":72,"content":"+1","user":{"login":"ada"}},{"id":73,"content":"heart","user":{"login":"ada"}}]`))
+		case p == "/repos/acme/api/issues/1/reactions/70":
+			w.WriteHeader(204)
+		case p == "/repos/acme/api/labels":
+			_, _ = w.Write([]byte(`[{"name":"bug","color":"d73a4a"}]`))
+		case p == "/repos/acme/api/milestones":
+			_, _ = w.Write([]byte(`[{"number":3,"title":"v2"}]`))
+		case p == "/repos/acme/api/issues/1/labels", p == "/repos/acme/api/issues/1", p == "/repos/acme/api/pulls/1/requested_reviewers", p == "/repos/acme/api/issues/1/assignees":
 			_, _ = w.Write([]byte(`{}`))
 		default:
 			w.WriteHeader(404)
@@ -231,17 +253,17 @@ func TestGitHubPullRequestReads(t *testing.T) {
 
 	_, out = r.do("GET", "project=11&iid=1", nil, h.MRDiscussions)
 	ds := out["data"].([]any)
-	if len(ds) != 4 {
-		t.Fatalf("discussions (comment + review summary + 2 threads): %v", out)
+	if len(ds) != 5 {
+		t.Fatalf("discussions (2 comments + review summary + 2 threads): %v", out)
 	}
-	if ds[0].(map[string]any)["id"] != "ic-91" || ds[1].(map[string]any)["id"] != "rv-202" {
+	if ds[0].(map[string]any)["id"] != "ic-91" || ds[1].(map[string]any)["id"] != "ic-92" || ds[2].(map[string]any)["id"] != "rv-202" {
 		t.Errorf("general threads in time order: %v", ds)
 	}
-	th := ds[2].(map[string]any)
+	th := ds[3].(map[string]any)
 	if th["id"] != "PRRT_1" || th["resolvable"] != true || th["position"].(map[string]any)["newLine"].(float64) != 7 {
 		t.Errorf("line thread: %v", th)
 	}
-	old := ds[3].(map[string]any)
+	old := ds[4].(map[string]any)
 	if old["resolved"] != true || old["position"].(map[string]any)["oldLine"].(float64) != 3 || old["notes"].([]any)[0].(map[string]any)["author"] != "ghost" {
 		t.Errorf("outdated LEFT thread from a deleted user: %v", old)
 	}
@@ -357,6 +379,9 @@ func TestGitHubConnectionNeverReachesGitLab(t *testing.T) {
 		"RebaseMR": h.RebaseMR, "MRDiscussions": h.MRDiscussions, "CreateMRDiscussion": h.CreateMRDiscussion,
 		"ReplyMRDiscussion": h.ReplyMRDiscussion, "ResolveMRDiscussion": h.ResolveMRDiscussion,
 		"MRApprovals": h.MRApprovals, "MRPipelines": h.MRPipelines, "ProjectMembers": h.ProjectMembers,
+		"UpdateMRNote": h.UpdateMRNote, "DeleteMRNote": h.DeleteMRNote, "MRCommits": h.MRCommits,
+		"CancelAutoMergeMR": h.CancelAutoMergeMR, "MRAwards": h.MRAwards, "ToggleMRAward": h.ToggleMRAward,
+		"ProjectLabels": h.ProjectLabels, "ProjectMilestones": h.ProjectMilestones,
 	} {
 		before := *r.glHit
 		r.do("POST", "project=11&iid=1&discussion=PRRT_1", map[string]any{"body": "x", "title": "t", "sourceBranch": "a", "targetBranch": "b"}, fn)

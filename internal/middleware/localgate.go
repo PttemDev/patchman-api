@@ -153,6 +153,7 @@ func init() {
 		{"GET", "/api/k8s/:id/exec"},
 		{"GET", "/api/k8s/:id/local-shell"},
 		{"GET", "/api/ai/claude-shell"},
+		{"GET", "/api/terminal/shell"},
 		// Cluster writes and port-forwards.
 		{"POST", "/api/k8s/:id/apply"},
 		{"POST", "/api/k8s/:id/scale"},
