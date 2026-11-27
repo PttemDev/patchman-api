@@ -990,6 +990,7 @@ func main() {
 			api.POST("/es/:id/request", esOpsH.Request)
 			// Kibana data views (8.x) / index patterns (7.x): list + Discover search.
 			api.GET("/es/:id/kibana/spaces", esOpsH.KibanaSpaces)
+			api.GET("/es/:id/kibana/tenants", esOpsH.KibanaTenants)
 			api.GET("/es/:id/data-views", esOpsH.DataViews)
 			api.GET("/es/:id/data-views/:dvId", esOpsH.DataView)
 			api.POST("/es/:id/data-views/:dvId/search", esOpsH.DataViewSearch)

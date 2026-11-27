@@ -61,14 +61,14 @@ func TestDataViews8x(t *testing.T) {
 	r := newTestRegistry()
 	conn := directConn("c1", srv.URL, "ops")
 
-	list, err := r.DataViews(context.Background(), conn, ConfiguredSpace(conn))
+	list, err := r.DataViews(context.Background(), conn, KibanaScope{Space: ConfiguredSpace(conn)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(list) != 2 || list[0].Name != "Logs" || list[0].Pattern != "logs-*,-logs-debug*" || list[1].Name != "metrics-*" {
 		t.Fatalf("unexpected list: %+v", list)
 	}
-	dv, err := r.DataView(context.Background(), conn, "ops", "a")
+	dv, err := r.DataView(context.Background(), conn, KibanaScope{Space: "ops"}, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,11 +77,11 @@ func TestDataViews8x(t *testing.T) {
 	}
 	// Cached: a second list call must not hit Kibana.
 	n := len(paths)
-	if _, err := r.DataViews(context.Background(), conn, "ops"); err != nil || len(paths) != n {
+	if _, err := r.DataViews(context.Background(), conn, KibanaScope{Space: "ops"}); err != nil || len(paths) != n {
 		t.Fatalf("expected cache hit (calls %d→%d, err %v)", n, len(paths), err)
 	}
 	r.Close("c1")
-	if _, err := r.DataViews(context.Background(), conn, "ops"); err != nil || len(paths) != n+1 {
+	if _, err := r.DataViews(context.Background(), conn, KibanaScope{Space: "ops"}); err != nil || len(paths) != n+1 {
 		t.Fatalf("Close must drop the cache")
 	}
 }
@@ -106,14 +106,14 @@ func TestDataViews7xFallback(t *testing.T) {
 	r := newTestRegistry()
 	conn := directConn("c2", srv.URL, "")
 
-	list, err := r.DataViews(context.Background(), conn, "")
+	list, err := r.DataViews(context.Background(), conn, KibanaScope{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(list) != 1 || list[0].Pattern != "filebeat-*" || list[0].TimeField != "@timestamp" {
 		t.Fatalf("unexpected list: %+v", list)
 	}
-	dv, err := r.DataView(context.Background(), conn, "", "x")
+	dv, err := r.DataView(context.Background(), conn, KibanaScope{}, "x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,10 +132,10 @@ func TestKibanaErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 	r := newTestRegistry()
-	if _, err := r.DataViews(context.Background(), directConn("c3", srv.URL, ""), ""); err == nil || !strings.Contains(err.Error(), "401") {
+	if _, err := r.DataViews(context.Background(), directConn("c3", srv.URL, ""), KibanaScope{}); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("want 401 error, got %v", err)
 	}
-	if _, err := r.DataViews(context.Background(), models.ESConnection{ID: "c4", AuthKind: "basic"}, ""); err != ErrNoKibana {
+	if _, err := r.DataViews(context.Background(), models.ESConnection{ID: "c4", AuthKind: "basic"}, KibanaScope{}); err != ErrNoKibana {
 		t.Fatalf("want ErrNoKibana, got %v", err)
 	}
 }
@@ -152,7 +152,7 @@ func TestDataViewsViaKibanaProxyConn(t *testing.T) {
 	r.cipher = nil
 	conn := models.ESConnection{ID: "c5", AuthKind: "kibanaProxy", Username: "u",
 		OptionsJSON: `{"kibanaUrl":"` + srv.URL + `","kibanaAuthMode":"basic"}`}
-	if _, err := r.DataViews(context.Background(), conn, ""); err != nil {
+	if _, err := r.DataViews(context.Background(), conn, KibanaScope{}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(auth, "Basic ") {

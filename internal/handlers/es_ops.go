@@ -220,7 +220,35 @@ func kibanaSpaceParam(c *gin.Context, conn *models.ESConnection) (string, error)
 	return esquery.ConfiguredSpace(*conn), nil
 }
 
+// kibanaScopeParam resolves ?space= and ?tenant= (present wins, even empty;
+// otherwise the connection's configured kibanaSpace / kibanaTenant).
+func kibanaScopeParam(c *gin.Context, conn *models.ESConnection) (esquery.KibanaScope, error) {
+	space, err := kibanaSpaceParam(c, conn)
+	if err != nil {
+		return esquery.KibanaScope{}, err
+	}
+	tenant := esquery.ConfiguredTenant(*conn)
+	if v, ok := c.GetQuery("tenant"); ok {
+		if tenant, err = esquery.SanitizeTenant(v); err != nil {
+			return esquery.KibanaScope{}, err
+		}
+	}
+	return esquery.KibanaScope{Space: space, Tenant: tenant}, nil
+}
+
+// scopeTarget renders a scope for the audit target (no secrets).
+func scopeTarget(sc esquery.KibanaScope) string {
+	if sc.Tenant == "" {
+		return sc.Space
+	}
+	return sc.Space + "|t=" + sc.Tenant
+}
+
 func kibanaErr(c *gin.Context, err error) {
+	if errors.Is(err, esquery.ErrUnknownTenant) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "unknown_tenant"})
+		return
+	}
 	if errors.Is(err, esquery.ErrNoKibana) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "no_kibana"})
 		return
@@ -248,13 +276,34 @@ func (h *ESOpsHandler) KibanaSpaces(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": res})
 }
 
+// KibanaTenants lists the OpenSearch Dashboards security tenants of the
+// connection's user (supported=false on Kibana / no multi-tenancy).
+func (h *ESOpsHandler) KibanaTenants(c *gin.Context) {
+	conn, role, ok := h.access(c, false)
+	if !ok {
+		return
+	}
+	if c.Query("refresh") == "1" {
+		h.registry.RefreshKibana(conn.ID)
+	}
+	ctx, cancel := h.ctx(c, 20*time.Second)
+	defer cancel()
+	res, err := h.registry.Tenants(ctx, *conn)
+	h.audit(c, conn, role, "kibana_tenants", "GET", "kibana:/api/v1/configuration/account", err)
+	if err != nil {
+		kibanaErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": res})
+}
+
 // DataViews lists the Kibana data views (index patterns on 7.x) of a space.
 func (h *ESOpsHandler) DataViews(c *gin.Context) {
 	conn, role, ok := h.access(c, false)
 	if !ok {
 		return
 	}
-	space, err := kibanaSpaceParam(c, conn)
+	sc, err := kibanaScopeParam(c, conn)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -264,8 +313,8 @@ func (h *ESOpsHandler) DataViews(c *gin.Context) {
 	}
 	ctx, cancel := h.ctx(c, 30*time.Second)
 	defer cancel()
-	res, err := h.registry.DataViews(ctx, *conn, space)
-	h.audit(c, conn, role, "dataviews", "GET", "kibana:"+space+"/api/data_views", err)
+	res, err := h.registry.DataViews(ctx, *conn, sc)
+	h.audit(c, conn, role, "dataviews", "GET", "kibana:"+scopeTarget(sc)+"/api/data_views", err)
 	if err != nil {
 		kibanaErr(c, err)
 		return
@@ -279,15 +328,15 @@ func (h *ESOpsHandler) DataView(c *gin.Context) {
 	if !ok {
 		return
 	}
-	space, err := kibanaSpaceParam(c, conn)
+	sc, err := kibanaScopeParam(c, conn)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	ctx, cancel := h.ctx(c, 20*time.Second)
 	defer cancel()
-	dv, err := h.registry.DataView(ctx, *conn, space, c.Param("dvId"))
-	h.audit(c, conn, role, "dataviews", "GET", "kibana:"+space+"/api/data_views/data_view/"+c.Param("dvId"), err)
+	dv, err := h.registry.DataView(ctx, *conn, sc, c.Param("dvId"))
+	h.audit(c, conn, role, "dataviews", "GET", "kibana:"+scopeTarget(sc)+"/api/data_views/data_view/"+c.Param("dvId"), err)
 	if err != nil {
 		kibanaErr(c, err)
 		return
@@ -316,11 +365,21 @@ func (h *ESOpsHandler) DataViewSearch(c *gin.Context) {
 		}
 		space = s
 	}
+	tenant := esquery.ConfiguredTenant(*conn)
+	if input.Tenant != nil {
+		t, err := esquery.SanitizeTenant(*input.Tenant)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		tenant = t
+	}
+	sc := esquery.KibanaScope{Space: space, Tenant: tenant}
 	ctx, cancel := h.ctx(c, 60*time.Second)
 	defer cancel()
-	dv, err := h.registry.DataView(ctx, *conn, space, c.Param("dvId"))
+	dv, err := h.registry.DataView(ctx, *conn, sc, c.Param("dvId"))
 	if err != nil {
-		h.audit(c, conn, role, "dataview_search", "POST", "kibana:"+space+"/"+c.Param("dvId"), err)
+		h.audit(c, conn, role, "dataview_search", "POST", "kibana:"+scopeTarget(sc)+"/"+c.Param("dvId"), err)
 		kibanaErr(c, err)
 		return
 	}

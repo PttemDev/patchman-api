@@ -19,6 +19,9 @@ import (
 // DataViewSearchRequest is the FE / MCP wire contract.
 type DataViewSearchRequest struct {
 	Space string `json:"space"`
+	// Tenant = OSD security tenant; nil = the connection's configured one,
+	// "" = OSD's default (no header).
+	Tenant *string `json:"tenant,omitempty"`
 	// From / To accept ISO-8601 or ES date math ("now-15m", "now/d").
 	// Defaults: now-15m / now. Ignored when the data view has no time field.
 	From  string `json:"from"`

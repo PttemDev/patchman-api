@@ -130,11 +130,14 @@ type esDataViewsIn struct {
 	ID         string `json:"id" jsonschema:"Elasticsearch connection id"`
 	DataViewID string `json:"dataViewId,omitempty" jsonschema:"a data view id for its details; empty = list all"`
 	Space      string `json:"space,omitempty" jsonschema:"Kibana space id (default = the connection's space)"`
+	Tenant     string `json:"tenant,omitempty" jsonschema:"OpenSearch Dashboards security tenant: global, private or a custom tenant name (default = the connection's tenant)"`
+	Tenants    bool   `json:"tenants,omitempty" jsonschema:"true = list the OpenSearch Dashboards tenants you can read instead of data views"`
 }
 type esDataViewSearchIn struct {
 	ID          string `json:"id" jsonschema:"Elasticsearch connection id"`
 	DataViewID  string `json:"dataViewId" jsonschema:"data view id (see es_data_views)"`
 	Space       string `json:"space,omitempty" jsonschema:"Kibana space id (default = the connection's space)"`
+	Tenant      string `json:"tenant,omitempty" jsonschema:"OpenSearch Dashboards security tenant the data view lives in: global, private or a custom name (default = the connection's tenant)"`
 	From        string `json:"from,omitempty" jsonschema:"range start: ISO-8601 or date math like now-1h (default now-15m)"`
 	To          string `json:"to,omitempty" jsonschema:"range end (default now)"`
 	Query       string `json:"query,omitempty" jsonschema:"Lucene query_string, e.g. level:error AND service:api"`
@@ -174,11 +177,17 @@ func registerESTools(s *mcpsdk.Server, c *caller) {
 			return c.callCtx(ctx, "POST", "/api/es/"+url.PathEscape(in.ID)+"/request", in)
 		})
 	regCtx(s, "es_data_views",
-		"List Kibana data views (index patterns on Kibana 7.x / OpenSearch Dashboards) of an Elasticsearch connection — each has an index pattern and a time field. Pass dataViewId for one data view's details (time field + runtime fields). Needs a Kibana URL on the connection (or the 'via Kibana' mode). Read-only."+connNote,
+		"List Kibana data views (index patterns on Kibana 7.x / OpenSearch Dashboards) of an Elasticsearch connection — each has an index pattern and a time field. Pass dataViewId for one data view's details (time field + runtime fields). On OpenSearch Dashboards with multi-tenancy, data views differ per tenant: pass tenants=true to list the tenants, then tenant=<id>. Needs a Kibana URL on the connection (or the 'via Kibana' mode). Read-only."+connNote,
 		func(ctx context.Context, in esDataViewsIn) (int, string) {
+			if in.Tenants {
+				return c.callCtx(ctx, "GET", "/api/es/"+url.PathEscape(in.ID)+"/kibana/tenants", nil)
+			}
 			v := url.Values{}
 			if in.Space != "" {
 				v.Set("space", in.Space)
+			}
+			if in.Tenant != "" {
+				v.Set("tenant", in.Tenant)
 			}
 			p := "/api/es/" + url.PathEscape(in.ID) + "/data-views"
 			if in.DataViewID != "" {
@@ -195,6 +204,9 @@ func registerESTools(s *mcpsdk.Server, c *caller) {
 			}
 			if in.PitID != "" {
 				body["pitId"] = in.PitID
+			}
+			if in.Tenant != "" {
+				body["tenant"] = in.Tenant
 			}
 			if len(in.SearchAfter) > 0 {
 				body["searchAfter"] = in.SearchAfter

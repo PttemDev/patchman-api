@@ -47,6 +47,7 @@ type DataView struct {
 	// Only filled by the detail call (the 8.x list omits it).
 	RuntimeFields map[string]any `json:"runtimeFields,omitempty"`
 	Space         string         `json:"space,omitempty"`
+	Tenant        string         `json:"tenant,omitempty"` // OSD security tenant ("" = OSD's default)
 	// Detailed is true when TimeField/RuntimeFields are authoritative (detail
 	// call or a 7.x _find that returned them).
 	Detailed bool `json:"detailed"`
@@ -180,10 +181,22 @@ func (r *Registry) kibanaClient(conn models.ESConnection) (*http.Client, error) 
 	return cl, nil
 }
 
-// kibanaGet performs a GET against Kibana's public API in the given space.
+// KibanaScope selects where Kibana saved objects are read: a Kibana space
+// (/s/<id> prefix) and/or an OpenSearch Dashboards security tenant
+// (securitytenant header). Kibana has spaces, OSD has tenants; an empty
+// field means "the server's default".
+type KibanaScope struct {
+	Space  string
+	Tenant string
+}
+
+func (s KibanaScope) cacheKey() string { return s.Space + "|t=" + s.Tenant }
+
+// kibanaGet performs a GET against Kibana's public API in the given scope.
 // A 404 is returned as ErrKibanaNotFound so callers can fall back to the 7.x
 // saved-objects API.
-func (r *Registry) kibanaGet(ctx context.Context, conn models.ESConnection, space, path string) ([]byte, error) {
+func (r *Registry) kibanaGet(ctx context.Context, conn models.ESConnection, sc KibanaScope, path string) ([]byte, error) {
+	space := sc.Space
 	t, err := r.kibana(conn)
 	if err != nil {
 		return nil, err
@@ -198,6 +211,11 @@ func (r *Registry) kibanaGet(ctx context.Context, conn models.ESConnection, spac
 		return nil, err
 	}
 	setKibanaHeaders(req)
+	if sc.Tenant != "" {
+		// OSD's tenant resolver reads this header before the session cookie,
+		// so it also overrides the tenant a kibanaProxy cookie was minted in.
+		req.Header.Set("securitytenant", sc.Tenant)
+	}
 	if t.auth != "" {
 		req.Header.Set("Authorization", t.auth)
 	}
@@ -282,7 +300,7 @@ func (r *Registry) Spaces(ctx context.Context, conn models.ESConnection) (*Space
 		return v.(*SpacesResult), nil
 	}
 	out := &SpacesResult{Default: ConfiguredSpace(conn)}
-	raw, err := r.kibanaGet(ctx, conn, "", "/api/spaces/space")
+	raw, err := r.kibanaGet(ctx, conn, KibanaScope{}, "/api/spaces/space")
 	switch {
 	case errors.Is(err, ErrKibanaNotFound):
 		out.Spaces = []KibanaSpace{{ID: "default", Name: "Default"}}
@@ -304,18 +322,22 @@ func (r *Registry) Spaces(ctx context.Context, conn models.ESConnection) (*Space
 
 // ---- data views ---------------------------------------------------------------
 
-// DataViews lists data views in a space: 8.x /api/data_views, falling back to
+// DataViews lists data views in a scope: 8.x /api/data_views, falling back to
 // the 7.x / OpenSearch Dashboards saved-objects _find on 404.
-func (r *Registry) DataViews(ctx context.Context, conn models.ESConnection, space string) ([]DataView, error) {
-	key := conn.ID + "|dvs|" + space
+func (r *Registry) DataViews(ctx context.Context, conn models.ESConnection, sc KibanaScope) ([]DataView, error) {
+	space := sc.Space
+	key := conn.ID + "|dvs|" + sc.cacheKey()
 	if v, ok := cacheGet(key); ok && conn.ID != "" {
 		return v.([]DataView), nil
 	}
-	raw, err := r.kibanaGet(ctx, conn, space, "/api/data_views")
+	if err := r.checkTenant(ctx, conn, sc.Tenant); err != nil {
+		return nil, err
+	}
+	raw, err := r.kibanaGet(ctx, conn, sc, "/api/data_views")
 	var out []DataView
 	switch {
 	case errors.Is(err, ErrKibanaNotFound):
-		out, err = r.findIndexPatterns(ctx, conn, space)
+		out, err = r.findIndexPatterns(ctx, conn, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -327,6 +349,9 @@ func (r *Registry) DataViews(ctx context.Context, conn models.ESConnection, spac
 			return nil, err
 		}
 	}
+	for i := range out {
+		out[i].Tenant = sc.Tenant
+	}
 	sort.SliceStable(out, func(i, j int) bool {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
@@ -337,7 +362,8 @@ func (r *Registry) DataViews(ctx context.Context, conn models.ESConnection, spac
 }
 
 // findIndexPatterns pages through saved_objects/_find?type=index-pattern.
-func (r *Registry) findIndexPatterns(ctx context.Context, conn models.ESConnection, space string) ([]DataView, error) {
+func (r *Registry) findIndexPatterns(ctx context.Context, conn models.ESConnection, sc KibanaScope) ([]DataView, error) {
+	space := sc.Space
 	const perPage = 1000
 	var out []DataView
 	for page := 1; page <= 20; page++ {
@@ -348,7 +374,7 @@ func (r *Registry) findIndexPatterns(ctx context.Context, conn models.ESConnecti
 		q.Add("fields", "name")
 		q.Set("per_page", fmt.Sprint(perPage))
 		q.Set("page", fmt.Sprint(page))
-		raw, err := r.kibanaGet(ctx, conn, space, "/api/saved_objects/_find?"+q.Encode())
+		raw, err := r.kibanaGet(ctx, conn, sc, "/api/saved_objects/_find?"+q.Encode())
 		if err != nil {
 			if errors.Is(err, ErrKibanaNotFound) {
 				return nil, fmt.Errorf("this Kibana exposes neither /api/data_views nor /api/saved_objects")
@@ -368,25 +394,29 @@ func (r *Registry) findIndexPatterns(ctx context.Context, conn models.ESConnecti
 }
 
 // DataView returns one data view with its time field + runtime fields.
-func (r *Registry) DataView(ctx context.Context, conn models.ESConnection, space, id string) (*DataView, error) {
+func (r *Registry) DataView(ctx context.Context, conn models.ESConnection, sc KibanaScope, id string) (*DataView, error) {
+	space := sc.Space
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil, fmt.Errorf("data view id is required")
 	}
-	key := conn.ID + "|dv|" + space + "|" + id
+	key := conn.ID + "|dv|" + sc.cacheKey() + "|" + id
 	if v, ok := cacheGet(key); ok && conn.ID != "" {
 		dv := v.(DataView)
 		return &dv, nil
 	}
+	if err := r.checkTenant(ctx, conn, sc.Tenant); err != nil {
+		return nil, err
+	}
 	esc := url.PathEscape(id)
-	raw, err := r.kibanaGet(ctx, conn, space, "/api/data_views/data_view/"+esc)
+	raw, err := r.kibanaGet(ctx, conn, sc, "/api/data_views/data_view/"+esc)
 	var dv *DataView
 	switch {
 	case errors.Is(err, ErrKibanaNotFound):
-		raw, err = r.kibanaGet(ctx, conn, space, "/api/saved_objects/index-pattern/"+esc)
+		raw, err = r.kibanaGet(ctx, conn, sc, "/api/saved_objects/index-pattern/"+esc)
 		if err != nil {
 			if errors.Is(err, ErrKibanaNotFound) {
-				return nil, fmt.Errorf("data view %q not found in this space", id)
+				return nil, fmt.Errorf("data view %q not found in this space / tenant", id)
 			}
 			return nil, err
 		}
@@ -399,6 +429,7 @@ func (r *Registry) DataView(ctx context.Context, conn models.ESConnection, space
 	if err != nil {
 		return nil, err
 	}
+	dv.Tenant = sc.Tenant
 	if conn.ID != "" {
 		cachePut(key, *dv)
 	}
@@ -548,7 +579,7 @@ func nameOr(name, title string) string {
 // PingKibana checks GET /api/status (used by the connection Test as a
 // non-fatal warning).
 func (r *Registry) PingKibana(ctx context.Context, conn models.ESConnection) error {
-	_, err := r.kibanaGet(ctx, conn, "", "/api/status")
+	_, err := r.kibanaGet(ctx, conn, KibanaScope{}, "/api/status")
 	if errors.Is(err, ErrKibanaNotFound) {
 		return nil // reachable, route absent (OSD variants) — fine
 	}
